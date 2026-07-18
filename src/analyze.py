@@ -6,9 +6,14 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from matplotlib import pyplot as plt
+from pathlib import Path
 
 from lottery import Lottery
 from templates import Render
+
+
+GENERATED_IMAGE_DIR = Path('images/generated')
+LEGACY_REPORT_PATH = Path('output/legacy-analysis.md')
 
 
 def colors_from_values(values, palette_name):
@@ -47,7 +52,7 @@ def last_appearing(data: pd.DataFrame, type: str):
     fig, ax = plt.subplots()
     sns.heatmap(heatmap_data, annot=True, fmt='d', cmap='RdYlGn', ax=ax)
     ax.set_title('Delta')
-    fig.savefig('images/special_delta.jpg')
+    fig.savefig(GENERATED_IMAGE_DIR / 'special_delta.jpg')
 
     fig, ax = plt.subplots()
     palette = reversed(colors_from_values(bar_data['delta'], 'summer'))
@@ -55,7 +60,7 @@ def last_appearing(data: pd.DataFrame, type: str):
     for bar in ax.containers:
         ax.bar_label(bar, fmt='%d')
     ax.set_title('Top 10')
-    fig.savefig('images/special_delta_top_10.jpg')
+    fig.savefig(GENERATED_IMAGE_DIR / 'special_delta_top_10.jpg')
 
 
 def last_appearing_loto(data):
@@ -88,7 +93,7 @@ def last_appearing_loto(data):
     fig, ax = plt.subplots()
     sns.heatmap(heatmap_data, annot=True, fmt='d', cmap='RdYlGn', ax=ax)
     ax.set_title('Delta')
-    fig.savefig('images/delta.jpg')
+    fig.savefig(GENERATED_IMAGE_DIR / 'delta.jpg')
 
     fig, ax = plt.subplots()
     palette = reversed(colors_from_values(bar_data['delta'], 'summer'))
@@ -96,10 +101,12 @@ def last_appearing_loto(data):
     for bar in ax.containers:
         ax.bar_label(bar, fmt='%d')
     ax.set_title('Top 10')
-    fig.savefig('images/delta_top_10.jpg')
+    fig.savefig(GENERATED_IMAGE_DIR / 'delta_top_10.jpg')
 
 
 if __name__ == '__main__':
+    GENERATED_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    LEGACY_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     lottery = Lottery()
     lottery.load()
 
@@ -154,7 +161,7 @@ if __name__ == '__main__':
         **small_results.iloc[-1],
     }
     content = render('README.j2', context)
-    with open('README.md', 'w', encoding='utf-8') as outfile:
+    with LEGACY_REPORT_PATH.open('w', encoding='utf-8') as outfile:
         outfile.write(content)
 
     counts = counts.reset_index()
@@ -174,7 +181,7 @@ if __name__ == '__main__':
     fig, ax = plt.subplots()
     sns.heatmap(heatmap_data, annot=True, fmt='d', cmap='RdYlGn', ax=ax)
     ax.set_title('Detail')
-    fig.savefig('images/heatmap.jpg')
+    fig.savefig(GENERATED_IMAGE_DIR / 'heatmap.jpg')
 
     # Top 10 plot
 
@@ -187,7 +194,7 @@ if __name__ == '__main__':
     for bar in ax.containers:
         ax.bar_label(bar, fmt='%d')
     ax.set_title('Top 10')
-    fig.savefig('images/top-10.jpg')
+    fig.savefig(GENERATED_IMAGE_DIR / 'top-10.jpg')
 
     # Distribution
 
@@ -205,7 +212,7 @@ if __name__ == '__main__':
     ax.vlines(mean - 2 * std, 0, np.interp(mean - 2 * std, xs, ys), color='red', linestyles='dotted')
     ax.vlines(mean + 2 * std, 0, np.interp(mean + 2 * std, xs, ys), color='red', linestyles='dotted')
     ax.set_title('Distribution')
-    fig.savefig('images/distribution.jpg')
+    fig.savefig(GENERATED_IMAGE_DIR / 'distribution.jpg')
 
     # Last appearing Loto
     last_appearing_loto(small_results)

@@ -1,0 +1,151 @@
+name: XSMN Historical Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_year:
+        description: First complete six-digit XSMN year
+        required: true
+        default: "2010"
+      to_year:
+        description: Last year; leave blank to use the current Vietnam year
+        required: false
+      force:
+        description: Replace dates already classified as successful
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vietnam-lottery-xsmn
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan yearly batches
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      years: ${{ steps.range.outputs.years }}
+    steps:
+      - name: Validate year range
+        id: range
+        shell: bash
+        env:
+          FROM_YEAR: ${{ inputs.from_year }}
+          TO_YEAR: ${{ inputs.to_year }}
+        run: |
+          current_year="$(TZ=Asia/Ho_Chi_Minh date +%Y)"
+          from_year="$FROM_YEAR"
+          to_year="${TO_YEAR:-$current_year}"
+
+          if [[ ! "$from_year" =~ ^[0-9]{4}$ || ! "$to_year" =~ ^[0-9]{4}$ ]]; then
+            echo "Years must use YYYY format." >&2
+            exit 1
+          fi
+          if (( from_year < 2010 )); then
+            echo "XSMN six-digit backfill must start in 2010 or later." >&2
+            exit 1
+          fi
+          if (( to_year < from_year || to_year > current_year )); then
+            echo "Invalid range: $from_year through $to_year (current year: $current_year)." >&2
+            exit 1
+          fi
+
+          years="$(jq -cn --argjson first "$from_year" --argjson last "$to_year" '[range($first; $last + 1)]')"
+          echo "years=$years" >> "$GITHUB_OUTPUT"
+          echo "Planned XSMN batches: $years"
+
+  backfill:
+    name: XSMN ${{ matrix.year }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        year: ${{ fromJSON(needs.plan.outputs.years) }}
+    env:
+      ETL_ENV: production
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      R2_XSMN_BUCKET_NAME: ${{ secrets.R2_XSMN_BUCKET_NAME }}
+      R2_XSMN_ACCOUNT_ID: ${{ secrets.R2_XSMN_ACCOUNT_ID }}
+      R2_XSMN_ACCESS_KEY_ID: ${{ secrets.R2_XSMN_ACCESS_KEY_ID }}
+      R2_XSMN_SECRET_ACCESS_KEY: ${{ secrets.R2_XSMN_SECRET_ACCESS_KEY }}
+      R2_XSMN_ENDPOINT_URL: ${{ secrets.R2_XSMN_ENDPOINT_URL }}
+      R2_XSMN_PUBLIC_BASE_URL: ${{ vars.R2_XSMN_PUBLIC_BASE_URL }}
+      SOURCE_BASE_URL: ${{ vars.SOURCE_BASE_URL }}
+      FORCE: ${{ inputs.force }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install locked runtime dependencies
+        run: uv sync --frozen --no-dev
+
+      - name: Run yearly XSMN batch
+        shell: bash
+        env:
+          BATCH_YEAR: ${{ matrix.year }}
+        run: |
+          current_date="$(TZ=Asia/Ho_Chi_Minh date +%F)"
+          current_year="${current_date%%-*}"
+          from_date="${BATCH_YEAR}-01-01"
+          if [[ "$BATCH_YEAR" == "$current_year" ]]; then
+            to_date="$current_date"
+          else
+            to_date="${BATCH_YEAR}-12-31"
+          fi
+
+          command=(
+            uv run lottery-etl backfill
+            --storage r2
+            --region xsmn
+            --from "$from_date"
+            --to "$to_date"
+          )
+          if [[ "$FORCE" == "true" ]]; then
+            command+=(--force)
+          fi
+
+          "${command[@]}" | tee xsmn-backfill-result.json
+          if jq -e 'any(.[]; .status == "failed")' xsmn-backfill-result.json >/dev/null; then
+            echo "One or more XSMN dates failed; rerun this year after inspecting the result." >&2
+            exit 1
+          fi
+
+      - name: Write job summary
+        if: always()
+        shell: bash
+        run: |
+          echo "### XSMN backfill ${{ matrix.year }}" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f xsmn-backfill-result.json ]]; then
+            echo '```text' >> "$GITHUB_STEP_SUMMARY"
+            jq -r '
+              if length == 0 then
+                "No unresolved dates; the batch was already complete."
+              else
+                sort_by(.status)
+                | group_by(.status)[]
+                | "\(.[0].status): \(length)"
+              end
+            ' xsmn-backfill-result.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            failed_dates="$(jq -r '[.[] | select(.status == "failed") | .target_date] | join(", ")' xsmn-backfill-result.json)"
+            if [[ -n "$failed_dates" ]]; then
+              echo "Failed dates: $failed_dates" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            echo "The batch failed before producing a result file." >> "$GITHUB_STEP_SUMMARY"
+          fi

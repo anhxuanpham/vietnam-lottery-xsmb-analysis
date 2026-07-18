@@ -1,83 +1,136 @@
-# Vietnam Lottery (XSMB) Analysis
+# Vietnam Lottery XSMB/XSMN Data Lakes
 
-Using GitHub Action to automatically fetch and analyze results of the Vietnam lottery daily.
+An educational ETL and analytics project for Northern (`XSMB`) and Southern (`XSMN`) Vietnam lottery results. It extracts a selected date, preserves source lineage, validates official number widths, builds BI-friendly datasets, and publishes independently versioned objects to local storage or Cloudflare R2.
 
-This project is created by [Khiem Doan](https://github.com/khiemdoan). I create this project for education purpose only. You can use any resource in this repository for free without any permission.
+> This project performs descriptive analysis only. Historical lottery results do not reliably predict future draws and must not be presented as a betting system.
 
-Sử dụng GitHub Action để tự động hoá thu thập và phân tích kết quả xổ số hàng ngày của Việt Nam.
+The original XSMB project was created by [Khiem Doan](https://github.com/khiemdoan) and remains available under the MIT license.
 
-Dự án này được tạo bởi [Khiêm Đoàn](https://github.com/khiemdoan). Tôi tạo dự án này chỉ nhằm mục đích học tập. Bạn có thể sử dụng bất kỳ tài nguyên nào trong kho lưu trữ này một cách miễn phí mà không cần bất kỳ sự cho phép nào.
+Hướng dẫn triển khai đầy đủ bằng tiếng Việt: [HUONG_DAN_SU_DUNG.md](HUONG_DAN_SU_DUNG.md).
 
-| Lottery (Xổ số) | Loto (Lô tô) |
-| :------------: | :----------: |
-| <table><tr><td>Date (Ngày)</td><td>16-07-2026</td></tr><tr><td>Special (Giải đặc biệt)</td><td>96763</td></tr><tr><td>First (Giải nhất)</td><td>16246</td></tr><tr><td>Second (Giải nhì)</td><td>56517, 64137</td></tr><tr><td rowspan="2">Third (Giải ba)</td><td>43177, 31665, 74360</td></tr><tr><td>98165, 59063, 00916</td></tr><tr><td>Fourth (Giải tư)</td><td>2733, 2653, 2083, 1856</td></tr><tr><td rowspan="2">Fifth (Giải năm)</td><td>0452, 6287, 6628</td></tr><tr><td>4037, 3904, 7946</td></tr><tr><td>Sixth (Giải sáu)</td><td>329, 663, 879</td></tr><tr><td>Seventh (Giải bảy)</td><td>66, 80, 49, 61</td></tr></table> | <table><tr><td>First (Đầu)</td><td>Last (Đuôi)</td></tr><tr><td>0</td><td>4</td></tr><tr><td>1</td><td>6, 7</td></tr><tr><td>2</td><td>8, 9</td></tr><tr><td>3</td><td>3, 7, 7</td></tr><tr><td>4</td><td>6, 6, 9</td></tr><tr><td>5</td><td>2, 3, 6</td></tr><tr><td>6</td><td>0, 1, 3, 3, 3, 5, 5, 6</td></tr><tr><td>7</td><td>7, 9</td></tr><tr><td>8</td><td>0, 3, 7</td></tr><tr><td>9</td><td>-</td></tr></table> |
+Dashboard chạy local: [frontend/README.md](frontend/README.md).
 
-## Data (Dữ liệu)
+## Independent data lakes
 
-|          | CSV | JSON | Parquet |
-|----------|-----|------|---------|
-| Raw      | [xsmb.csv](https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb.csv) | [xsmb.json](https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb.json) | [xsmb.parquet](https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb.parquet) |
-| 2-digits | [xsmb-2-digits.csv](https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb-2-digits.csv) | [xsmb-2-digits.json](https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb-2-digits.json) | [xsmb-2-digits.parquet](https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb-2-digits.parquet) |
-| Sparse   | [xsmb-sparse.csv](https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb-sparse.csv) | [xsmb-sparse.json](https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb-sparse.json) | [xsmb-sparse.parquet](https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb-sparse.parquet) |
+XSMB and XSMN never share object-store state:
 
-## Using
+| Region | Default local root | R2 bucket setting | Fact grain |
+|---|---|---|---|
+| XSMB | `output/` | `R2_BUCKET_NAME` | date + prize group + prize order |
+| XSMN | `output-xsmn/` | `R2_XSMN_BUCKET_NAME` | date + station + prize group + prize order |
 
-You can use `curl` or `wget` to download data files. Or you can load them directly into DataFrame:
+Each root or bucket owns its own `bronze/`, `silver/`, `gold/`, `quality/`, and `manifests/` tree. A failure, backfill, or publication in one region therefore cannot update the other region's `manifests/latest.json`.
 
-Bạn có thể sử dụng curl hoặc wget để tải các tệp dữ liệu. Hoặc bạn có thể tải chúng trực tiếp vào DataFrame:
-
-```sh
-wget https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb.csv
+```text
+XSMB source -> XSMB bucket -> Bronze -> Silver -> Gold -> XSMB consumers
+XSMN source -> XSMN bucket -> Bronze -> Silver -> Gold -> XSMN consumers
 ```
 
-```sh
-curl -O https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb-2-digits.csv
+`manifests/latest.json` is the publication boundary inside each lake. It is updated only after the complete Gold dataset and snapshot manifest have been written.
+
+## Local setup
+
+Requires Python 3.14 and [uv](https://docs.astral.sh/uv/).
+
+```bash
+cp .env.example .env
+uv sync --all-groups
+uv run ruff format --check .
+uv run ruff check .
+uv run pytest
 ```
 
-```python
-import pandas as pd
+No Cloudflare credentials are required for local mode. Fixture commands default to local storage unless `--storage r2` is explicit. Run deterministic offline fixtures:
 
-df = pd.read_csv('https://raw.githubusercontent.com/khiemdoan/vietnam-lottery-xsmb-analysis/refs/heads/main/data/xsmb-sparse.csv')
-df.info()
+```bash
+# XSMB; --region xsmb is the backward-compatible default
+uv run lottery-etl run \
+  --region xsmb \
+  --target-date 2026-07-16 \
+  --fixture tests/fixtures/valid-result-page.html
+
+# XSMN; extracts all station columns represented by the page
+uv run lottery-etl run \
+  --region xsmn \
+  --target-date 2026-07-16 \
+  --fixture tests/fixtures/valid-xsmn-result-page.html
 ```
 
-<details>
-  <summary><h2>Analysis of special prices (Phân tích kết quả xổ số)</h2></summary>
-  <h3>Amount of day from last appearing (Số ngày từ lần xuất hiện cuối cùng)</h3>
+The legacy `xsmb-etl` executable remains an alias of `lottery-etl`.
 
-  ![Delta](images/special_delta.jpg)
+## Commands
 
-  <h3>Top 10 amount of day from last appearing (Top 10 số lâu chưa xuất hiện)</h3>
+Use `--region xsmb`, `--region xsmn`, or `--region all`. Omitting it preserves the original XSMB behavior.
 
-  ![Delta top 10](images/special_delta_top_10.jpg)
-</details>
+```bash
+uv run lottery-etl run --region xsmn --target-date 2026-07-16
+uv run lottery-etl run --region all --target-date 2026-07-16
+uv run lottery-etl backfill --region xsmn --from 2026-07-01 --to 2026-07-16
+uv run lottery-etl build-gold --region xsmn
+uv run lottery-etl validate --region xsmn
+uv run lottery-etl download-gold --region all --download-output downloads/
+uv run lottery-etl no-draw --region xsmn --target-date 2026-07-16 --detail "Officially confirmed no draw"
+```
 
-<details>
-  <summary><h2>Analysis of one-year Loto results (Phân tích kết quả lô tô trong 1 năm)</h2></summary>
+When `--region all` and `--output custom-root/` are combined, local objects are written to `custom-root/xsmb/` and `custom-root/xsmn/`. Successful dates are skipped unless `--force` is supplied. During backfill, an explicit source notice containing “không mở thưởng” is recorded as `no_draw`; unexpected network/parser failures are recorded as `failed`. Both outcomes are returned in the result list and processing continues with the next date. A missing table by itself is never sufficient to claim `no_draw`.
 
-  Max: 128. Min: 74.
+## Region-specific validation
 
-  Mean: 97.47. Standard deviation: 10.16.
+- XSMB requires 27 prize results and 100 loto rows per date; loto frequency sums to 27.
+- XSMN dynamically accepts the three or four stations shown on the requested page. Each station requires 18 prize results, including prize 8, and 100 station-level loto rows whose frequency sums to 18.
+- Leading zeros are retained in `formatted_number` for every official width, including six-digit XSMN special prizes.
+- XSMN station identity is derived from the station link and stored as `station_code`, `station_name`, `station_url`, and `station_order`.
 
-  <h3>Detail (Chi tiết)</h3>
+## Historical XSMB migration
 
-  ![Detail](images/heatmap.jpg)
+The repository's legacy JSON is XSMB-only and remains backward compatible:
 
-  <h3>Top 10</h3>
+```bash
+uv run lottery-etl migrate-legacy --input data/xsmb.json
+```
 
-  ![Top 10](images/top-10.jpg)
+Historical rows use `legacy_repository_dataset` lineage. XSMN history is acquired with `backfill --region xsmn`; it is never written into the XSMB lake.
 
-  <h3>Distribution (Phân bổ)</h3>
+## Cloudflare R2
 
-  ![Distribution](images/distribution.jpg)
-</details>
+Create two buckets, for example:
 
-<details>
-  <summary><h3>Amount of day from last appearing (Số ngày từ lần xuất hiện cuối cùng)</h2></summary>
+```bash
+npx wrangler login
+npx wrangler r2 bucket create xsmb-data-lake
+npx wrangler r2 bucket create xsmn-data-lake
+npx wrangler r2 bucket list
+```
 
-  ![Delta](images/delta.jpg)
+Required shared S3 settings are `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY`. Set both bucket names:
 
-  <h3>Top 10 amount of day from last appearing (Top 10 số lâu chưa xuất hiện)</h3>
+- `R2_BUCKET_NAME=xsmb-data-lake`
+- `R2_XSMN_BUCKET_NAME=xsmn-data-lake`
 
-  ![Delta top 10](images/delta_top_10.jpg)
-</details>
+A single bucket-scoped token may be authorized for both buckets. For stricter isolation, the optional `R2_XSMN_ACCOUNT_ID`, `R2_XSMN_ACCESS_KEY_ID`, `R2_XSMN_SECRET_ACCESS_KEY`, and `R2_XSMN_ENDPOINT_URL` override the shared connection only for XSMN.
+
+Keep Bronze and Silver private; expose only curated `gold/latest/*.csv` and Parquet objects through controlled custom-domain routes. See [R2 setup](docs/r2-setup.md) for the activation checklist and credential troubleshooting.
+
+## Analytics and BI
+
+- [Data dictionary](docs/data-dictionary.md)
+- [Power BI](docs/power-bi.md)
+- [Tableau](docs/tableau.md)
+- [Operations runbook](docs/operations.md)
+- [DuckDB analysis examples](sql/analysis-examples.sql)
+- [SQL quality checks](sql/data-quality-checks.sql)
+- [XSMN SQL quality checks](sql/xsmn-data-quality-checks.sql)
+- [Python public-Gold example](examples/read_gold.py)
+
+XSMN Gold adds `dim-station` and station fields to all facts. Gold CSV files are intended for Power BI and Tableau; Parquet files support Python and DuckDB. Credentials and presigned URLs are never committed.
+
+## Automation
+
+- `ci.yml` runs Ruff, pytest, and both offline fixture pipelines without production secrets.
+- `daily-etl.yml` runs both independent R2 lakes at 18:35 Vietnam time and supports manual region, target-date, and force inputs.
+- `xsmn-backfill.yml` runs resumable yearly XSMN batches from 2010 onward, one year at a time, and publishes Gold once per batch.
+- The daily workflow has read-only repository permissions and writes generated data to R2 rather than committing it to Git.
+
+## Legacy analysis
+
+The original wide local XSMB dataset and plotting script remain available for compatibility. Running `uv run src/analyze.py` writes its report to `output/legacy-analysis.md` and charts to `images/generated/`; it does not rewrite this README or tracked images.

@@ -273,7 +273,7 @@ Vào tab **Variables → New repository variable**:
 
 Credential luôn phải là Secret, không phải Variable, vì Variable có thể hiện rõ trong log.
 
-Fallback chỉ được gọi khi nguồn chính trả giải đặc biệt XSMN lịch sử có đúng 5 chữ số. Pipeline đối chiếu tập đài, toàn bộ 17 giải còn lại và 5 số cuối trước khi chấp nhận chữ số đầu từ nguồn độc lập; không tự thêm số `0`. Hai raw response, URL và hash được giữ trong Bronze để audit.
+Fallback chỉ được gọi cho ba dạng hỏng lịch sử nhận diện chặt chẽ: giải đặc biệt có đúng 5 chữ số, placeholder `...`, hoặc giải 8/7 bị đảo chính xác. Pipeline đối chiếu tập đài và toàn bộ giá trị không bị hỏng trước khi dùng giá trị từ nguồn độc lập; không tự thêm số `0` và không chấp nhận mismatch tùy ý. Hai raw response, URL và hash được giữ trong Bronze để audit.
 
 ### 8.4 Chạy thử bằng giao diện GitHub
 
@@ -353,6 +353,7 @@ Kiểm tra:
 R2 trả `412 PreconditionFailed` khi conditional PUT gặp object đã được một run khác tạo trước. Code hiện tại sẽ đọc lại object đó:
 
 - Cùng nội dung: tái sử dụng Bronze và tiếp tục pipeline.
+- HTML khác nhưng một lần ghi dở đã có canonical JSON giống hệt kết quả mới: giữ nguyên raw cũ, hoàn tất metadata và ghi dấu `partial_recovery=canonical_result_match` để audit.
 - Khác nội dung: đánh dấu ngày đó `failed`, giữ nguyên Bronze cũ và tiếp tục ngày kế tiếp.
 
 Chạy lại đúng lệnh backfill cũ, không thêm `--force`. Các ngày `success/no_draw` sẽ được skip, còn ngày `failed` hoặc chưa đủ dữ liệu sẽ được thử lại. Chỉ dùng `--force` sau khi đã kiểm tra source thực sự sửa kết quả và mày chủ động muốn thay Bronze.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import hashlib
 import json
 from pathlib import Path
 
@@ -114,3 +115,67 @@ def test_southern_repository_reuses_matching_bronze_from_an_interrupted_run(tmp_
 
     assert [item.key for item in resumed] == [item.key for item in first]
     assert repository.load_bronze(extracted.result.draw_date) == extracted
+
+
+def test_southern_repository_recovers_changed_html_for_equivalent_partial_bronze(tmp_path) -> None:
+    repository = SouthernDataLakeRepository(LocalObjectStore(tmp_path), gold_cache_control='no-cache')
+    original = _extracted()
+    current_raw = original.raw_response.replace(b'</body>', b'<div>volatile markup</div></body>')
+    current_result = parse_southern_result_page(
+        current_raw,
+        selected_date=original.result.draw_date,
+        source_url=original.result.source_url,
+    )
+    current = SouthernExtractedResult(raw_response=current_raw, result=current_result)
+    prefix = repository._bronze_prefix(original.result.draw_date)
+    repository.store.put_bytes(
+        f'{prefix}/response.html',
+        original.raw_response,
+        content_type='text/html; charset=utf-8',
+        overwrite=False,
+    )
+    repository.store.put_bytes(
+        f'{prefix}/parsed-results.json',
+        f'{original.result.model_dump_json(indent=2)}\n'.encode(),
+        content_type='application/json; charset=utf-8',
+        overwrite=False,
+    )
+
+    objects = repository.write_bronze(current, run_id='recovery-run')
+    metadata = json.loads(repository.store.get_bytes(f'{prefix}/metadata.json'))
+
+    assert len(objects) == 3
+    assert repository.store.get_bytes(f'{prefix}/response.html') == original.raw_response
+    assert metadata['raw_sha256'] == hashlib.sha256(original.raw_response).hexdigest()
+    assert metadata['recovery_candidate_raw_sha256'] == hashlib.sha256(current_raw).hexdigest()
+    assert metadata['partial_recovery'] == 'canonical_result_match'
+    assert metadata['fetched_at'] is None
+    assert metadata['recovered_at']
+    assert repository.bronze_complete(original.result.draw_date)
+
+
+def test_southern_repository_rejects_partial_bronze_with_different_canonical_result(tmp_path) -> None:
+    repository = SouthernDataLakeRepository(LocalObjectStore(tmp_path), gold_cache_control='no-cache')
+    extracted = _extracted()
+    prefix = repository._bronze_prefix(extracted.result.draw_date)
+    changed_raw = extracted.raw_response.replace(b'>07<', b'>08<', 1)
+    changed_result = parse_southern_result_page(
+        changed_raw,
+        selected_date=extracted.result.draw_date,
+        source_url=extracted.result.source_url,
+    )
+    repository.store.put_bytes(
+        f'{prefix}/response.html',
+        changed_raw,
+        content_type='text/html; charset=utf-8',
+        overwrite=False,
+    )
+    repository.store.put_bytes(
+        f'{prefix}/parsed-results.json',
+        f'{changed_result.model_dump_json(indent=2)}\n'.encode(),
+        content_type='application/json; charset=utf-8',
+        overwrite=False,
+    )
+
+    with pytest.raises(BronzeConflictError):
+        repository.write_bronze(extracted, run_id='recovery-run')

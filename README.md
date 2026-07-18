@@ -109,7 +109,7 @@ Required shared S3 settings are `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, and `R2_SEC
 
 A single bucket-scoped token may be authorized for both buckets. For stricter isolation, the optional `R2_XSMN_ACCOUNT_ID`, `R2_XSMN_ACCESS_KEY_ID`, `R2_XSMN_SECRET_ACCESS_KEY`, and `R2_XSMN_ENDPOINT_URL` override the shared connection only for XSMN.
 
-`XSMN_FALLBACK_BASE_URL` is optional and defaults to `https://xskt.com.vn`. It is contacted only when a historical primary page has a five-digit special prize. The extractor accepts the missing prefix only after the fallback station set, every other prize, and the five-digit suffix all match; both raw responses and hashes are retained in Bronze.
+`XSMN_FALLBACK_BASE_URL` is optional and defaults to `https://xskt.com.vn`. It is contacted only for strictly recognizable historical corruption: a five-digit special prize, explicit `...` placeholders, or an exact prize-8/prize-7 transposition. The extractor repairs only the affected values after the station set and every unaffected prize match the independent source; arbitrary mismatches still fail. Both raw responses and hashes are retained in Bronze.
 
 Keep Bronze and Silver private; expose only curated `gold/latest/*.csv` and Parquet objects through controlled custom-domain routes. See [R2 setup](docs/r2-setup.md) for the activation checklist and credential troubleshooting.
 

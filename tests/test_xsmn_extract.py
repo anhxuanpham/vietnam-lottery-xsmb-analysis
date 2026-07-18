@@ -25,6 +25,12 @@ HISTORICAL_SPECIALS = (
     (date(2010, 11, 30), ('893651', '036777', '952997')),
     (date(2010, 12, 1), ('106921', '489263', '757702')),
 )
+HISTORICAL_TRANSPOSED_SMALL_PRIZES = (
+    (date(2011, 11, 5), ('034400', '058501', '792599'), '88', '303'),
+    (date(2012, 4, 28), ('259689', '497824', '207821'), '34', '327'),
+    (date(2012, 7, 21), ('081644', '455828', '303223'), '14', '766'),
+    (date(2012, 9, 1), ('970149', '689757', '493726'), '45', '898'),
+)
 
 
 class StubResponse:
@@ -60,6 +66,27 @@ def _historical_primary_page(
     return page.encode()
 
 
+def _historical_transposed_page(
+    selected_date: date,
+    specials: tuple[str, str, str],
+    prize8: str,
+    prize7: str,
+    *,
+    transpose_small_prizes: bool,
+) -> bytes:
+    page = _historical_primary_page(selected_date, specials, truncate_specials=False).decode()
+    page = page.replace('Bình Thuận', 'Bình Phước')
+    page = page.replace('/xo-so-binh-thuan/xsbth-p1.html', '/xo-so-binh-phuoc/xsbp-p1.html')
+    page = page.replace('>23<', f'>{prize8}<', 1).replace('>445<', f'>{prize7}<', 1)
+    if transpose_small_prizes:
+        page = page.replace(f'>{prize8}<', '>__PRIZE8__<', 1)
+        page = page.replace(f'>{prize7}<', f'>{prize8}<', 1)
+        page = page.replace('>__PRIZE8__<', f'>{prize7}<', 1)
+        for special in specials:
+            page = page.replace(f'>{special}<', f'>{special[-5:]}<', 1)
+    return page.encode()
+
+
 def _fallback_page(result: SouthernDailyResult) -> bytes:
     labels = {
         SouthernPrizeGroup.PRIZE8: 'G.8',
@@ -88,6 +115,92 @@ def _fallback_page(result: SouthernDailyResult) -> bytes:
         f'<body><table class="tbl-xsmn"><tr><th>{result.draw_date:%d/%m}</th>{headers}</tr>'
         f'{"".join(rows)}</table></body></html>'
     ).encode()
+
+
+def _primary_page(result: SouthernDailyResult) -> bytes:
+    labels = {
+        SouthernPrizeGroup.PRIZE8: '8',
+        SouthernPrizeGroup.PRIZE7: '7',
+        SouthernPrizeGroup.PRIZE6: '6',
+        SouthernPrizeGroup.PRIZE5: '5',
+        SouthernPrizeGroup.PRIZE4: '4',
+        SouthernPrizeGroup.PRIZE3: '3',
+        SouthernPrizeGroup.PRIZE2: '2',
+        SouthernPrizeGroup.PRIZE1: '1',
+        SouthernPrizeGroup.SPECIAL: 'ĐB',
+    }
+    headers = ''.join(
+        f'<th><h3><a href="/xs{station.station_code.lower()}-p1.html">{station.station_name}</a></h3></th>'
+        for station in result.stations
+    )
+    rows = []
+    for group in SouthernPrizeGroup:
+        cells = ''.join(
+            f'<td>{"".join(f'<span class="xs_prize1">{prize.formatted_number}</span>' for prize in station.prizes_for(group))}</td>'
+            for station in result.stations
+        )
+        rows.append(f'<tr><th>{labels[group]}</th>{cells}</tr>')
+    return (
+        f'<html><body><section id="mn_kqngay_{result.draw_date:%d%m%Y}">'
+        f'<table class="table-result table-xsmn"><thead><tr><th>G</th>{headers}</tr></thead>'
+        f'<tbody>{"".join(rows)}</tbody></table></section></body></html>'
+    ).encode()
+
+
+def _four_station_result(
+    selected_date: date,
+    specials: tuple[str, str, str, str],
+    *,
+    prize8: str,
+    prize7: str,
+    source_url: str,
+) -> SouthernDailyResult:
+    base = parse_southern_result_page(
+        _historical_primary_page(selected_date, specials[:3], truncate_specials=False),
+        selected_date=selected_date,
+        source_url=source_url,
+    )
+    identities = (('HCM', 'TP.HCM'), ('LA', 'Long An'), ('BP', 'Bình Phước'))
+    stations = []
+    for index, (station, (station_code, station_name)) in enumerate(zip(base.stations, identities, strict=True)):
+        prizes = station.prizes
+        if index == 2:
+            prizes = tuple(
+                prize.model_copy(update={'full_number': int(prize8)})
+                if prize.prize_group is SouthernPrizeGroup.PRIZE8
+                else prize.model_copy(update={'full_number': int(prize7)})
+                if prize.prize_group is SouthernPrizeGroup.PRIZE7
+                else prize
+                for prize in prizes
+            )
+        stations.append(
+            station.model_copy(
+                update={
+                    'station_code': station_code,
+                    'station_name': station_name,
+                    'station_url': f'https://primary.test/xs{station_code.lower()}-p1.html',
+                    'prizes': prizes,
+                }
+            )
+        )
+    template = stations[0]
+    hau_giang_prizes = tuple(
+        prize.model_copy(update={'full_number': int(specials[3])})
+        if prize.prize_group is SouthernPrizeGroup.SPECIAL
+        else prize
+        for prize in template.prizes
+    )
+    stations.append(
+        template.model_copy(
+            update={
+                'station_code': 'HG',
+                'station_name': 'Hậu Giang',
+                'station_url': 'https://primary.test/xshg-p1.html',
+                'prizes': hau_giang_prizes,
+            }
+        )
+    )
+    return base.model_copy(update={'stations': tuple(stations)})
 
 
 def test_parse_southern_page_extracts_all_station_columns() -> None:
@@ -166,6 +279,144 @@ def test_southern_extractor_reconciles_known_historical_special_prefixes(
     ] == list(specials)
 
 
+def test_southern_extractor_reconciles_historical_placeholders() -> None:
+    selected_date = date(2011, 2, 3)
+    specials = ('250835', '010835', '605768')
+    primary_url = f'https://primary.test/xsmn-{selected_date:%d-%m-%Y}.html'
+    fallback_url = f'https://fallback.test/ngay/{selected_date:%d-%m-%Y}'
+    complete_primary = _historical_primary_page(selected_date, specials, truncate_specials=False)
+    complete_result = parse_southern_result_page(
+        complete_primary,
+        selected_date=selected_date,
+        source_url=primary_url,
+    )
+    primary = complete_primary.replace(b'>54496<', b'>...<').replace(b'>010835<', b'>...<')
+    fallback = _fallback_page(complete_result)
+    client = RecordingHttpClient({primary_url: primary, fallback_url: fallback})
+    extractor = SouthernResultExtractor(
+        Settings(source_base_url='https://primary.test', xsmn_fallback_base_url='https://fallback.test'),
+        client,
+    )
+
+    extracted = extractor.extract(selected_date)
+
+    an_giang = extracted.result.stations[1]
+    assert client.calls == [primary_url, fallback_url]
+    assert an_giang.prizes_for(SouthernPrizeGroup.PRIZE1)[0].formatted_number == '54496'
+    assert an_giang.prizes_for(SouthernPrizeGroup.SPECIAL)[0].formatted_number == '010835'
+
+
+@pytest.mark.parametrize(
+    ('selected_date', 'specials', 'prize8', 'prize7'),
+    HISTORICAL_TRANSPOSED_SMALL_PRIZES,
+)
+def test_southern_extractor_reconciles_historical_transposed_small_prizes(
+    selected_date: date,
+    specials: tuple[str, str, str],
+    prize8: str,
+    prize7: str,
+) -> None:
+    primary_url = f'https://primary.test/xsmn-{selected_date:%d-%m-%Y}.html'
+    fallback_url = f'https://fallback.test/ngay/{selected_date:%d-%m-%Y}'
+    complete_primary = _historical_transposed_page(
+        selected_date,
+        specials,
+        prize8,
+        prize7,
+        transpose_small_prizes=False,
+    )
+    complete_result = parse_southern_result_page(
+        complete_primary,
+        selected_date=selected_date,
+        source_url=primary_url,
+    )
+    primary = _historical_transposed_page(
+        selected_date,
+        specials,
+        prize8,
+        prize7,
+        transpose_small_prizes=True,
+    )
+    fallback = _fallback_page(complete_result)
+    client = RecordingHttpClient({primary_url: primary, fallback_url: fallback})
+    extractor = SouthernResultExtractor(
+        Settings(source_base_url='https://primary.test', xsmn_fallback_base_url='https://fallback.test'),
+        client,
+    )
+
+    extracted = extractor.extract(selected_date)
+
+    binh_phuoc = extracted.result.stations[2]
+    assert client.calls == [primary_url, fallback_url]
+    assert binh_phuoc.station_code == 'BP'
+    assert binh_phuoc.prizes_for(SouthernPrizeGroup.PRIZE8)[0].formatted_number == prize8
+    assert binh_phuoc.prizes_for(SouthernPrizeGroup.PRIZE7)[0].formatted_number == prize7
+    assert binh_phuoc.prizes_for(SouthernPrizeGroup.SPECIAL)[0].formatted_number == specials[2]
+
+
+def test_southern_extractor_reconciles_one_damaged_suffix_in_daywide_special_truncation() -> None:
+    selected_date = date(2013, 5, 18)
+    specials = ('803538', '610900', '328039', '371574')
+    primary_url = f'https://primary.test/xsmn-{selected_date:%d-%m-%Y}.html'
+    fallback_url = f'https://fallback.test/ngay/{selected_date:%d-%m-%Y}'
+    complete_result = _four_station_result(
+        selected_date,
+        specials,
+        prize8='02',
+        prize7='141',
+        source_url=primary_url,
+    )
+    primary = _primary_page(complete_result)
+    for special in specials:
+        replacement = '63538' if special == specials[0] else special[-5:]
+        primary = primary.replace(f'>{special}<'.encode(), f'>{replacement}<'.encode(), 1)
+    primary = primary.replace(b'>02<', b'>__PRIZE8__<', 1)
+    primary = primary.replace(b'>141<', b'>02<', 1)
+    primary = primary.replace(b'>__PRIZE8__<', b'>141<', 1)
+    fallback = _fallback_page(complete_result)
+    client = RecordingHttpClient({primary_url: primary, fallback_url: fallback})
+    extractor = SouthernResultExtractor(
+        Settings(source_base_url='https://primary.test', xsmn_fallback_base_url='https://fallback.test'),
+        client,
+    )
+
+    extracted = extractor.extract(selected_date)
+
+    assert [
+        station.prizes_for(SouthernPrizeGroup.SPECIAL)[0].formatted_number for station in extracted.result.stations
+    ] == list(specials)
+    binh_phuoc = extracted.result.stations[2]
+    assert binh_phuoc.prizes_for(SouthernPrizeGroup.PRIZE8)[0].formatted_number == '02'
+    assert binh_phuoc.prizes_for(SouthernPrizeGroup.PRIZE7)[0].formatted_number == '141'
+
+
+def test_southern_extractor_rejects_two_damaged_suffixes_in_daywide_special_truncation() -> None:
+    selected_date = date(2013, 5, 18)
+    specials = ('803538', '610900', '328039', '371574')
+    primary_url = f'https://primary.test/xsmn-{selected_date:%d-%m-%Y}.html'
+    fallback_url = f'https://fallback.test/ngay/{selected_date:%d-%m-%Y}'
+    complete_result = _four_station_result(
+        selected_date,
+        specials,
+        prize8='02',
+        prize7='141',
+        source_url=primary_url,
+    )
+    primary = _primary_page(complete_result)
+    replacements = ('63538', '20900', specials[2][-5:], specials[3][-5:])
+    for special, replacement in zip(specials, replacements, strict=True):
+        primary = primary.replace(f'>{special}<'.encode(), f'>{replacement}<'.encode(), 1)
+    fallback = _fallback_page(complete_result)
+    client = RecordingHttpClient({primary_url: primary, fallback_url: fallback})
+    extractor = SouthernResultExtractor(
+        Settings(source_base_url='https://primary.test', xsmn_fallback_base_url='https://fallback.test'),
+        client,
+    )
+
+    with pytest.raises(SourceReconciliationError, match='HCM special'):
+        extractor.extract(selected_date)
+
+
 def test_southern_extractor_rejects_fallback_value_mismatch() -> None:
     selected_date, specials = HISTORICAL_SPECIALS[0]
     primary_url = f'https://primary.test/xsmn-{selected_date:%d-%m-%Y}.html'
@@ -184,6 +435,39 @@ def test_southern_extractor_rejects_fallback_value_mismatch() -> None:
     )
 
     with pytest.raises(SourceReconciliationError, match='TN special'):
+        extractor.extract(selected_date)
+
+
+def test_southern_extractor_rejects_unrelated_mismatch_during_historical_repair() -> None:
+    selected_date, specials, prize8, prize7 = HISTORICAL_TRANSPOSED_SMALL_PRIZES[0]
+    primary_url = f'https://primary.test/xsmn-{selected_date:%d-%m-%Y}.html'
+    fallback_url = f'https://fallback.test/ngay/{selected_date:%d-%m-%Y}'
+    complete_primary = _historical_transposed_page(
+        selected_date,
+        specials,
+        prize8,
+        prize7,
+        transpose_small_prizes=False,
+    )
+    complete_result = parse_southern_result_page(
+        complete_primary,
+        selected_date=selected_date,
+        source_url=primary_url,
+    )
+    primary = _historical_transposed_page(
+        selected_date,
+        specials,
+        prize8,
+        prize7,
+        transpose_small_prizes=True,
+    ).replace(b'>6227<', b'>6228<')
+    client = RecordingHttpClient({primary_url: primary, fallback_url: _fallback_page(complete_result)})
+    extractor = SouthernResultExtractor(
+        Settings(source_base_url='https://primary.test', xsmn_fallback_base_url='https://fallback.test'),
+        client,
+    )
+
+    with pytest.raises(SourceReconciliationError, match='BP prize6'):
         extractor.extract(selected_date)
 
 

@@ -41,6 +41,8 @@ uv run lottery-etl no-draw \
 
 Bronze is immutable by default. Inspect the stored raw response and source correction, then use `--force` only when replacement is intentional:
 
+An interrupted XSMN Bronze write can be completed without `--force` when the stored canonical JSON exactly matches a fresh extraction. The original raw HTML remains immutable and the completed metadata records `partial_recovery=canonical_result_match`. Any canonical difference remains a hard conflict.
+
 ```bash
 uv run lottery-etl run --region xsmn --target-date 2026-07-16 --force
 ```

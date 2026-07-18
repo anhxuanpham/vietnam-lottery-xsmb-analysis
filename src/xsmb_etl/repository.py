@@ -409,6 +409,11 @@ class SouthernDataLakeRepository(DataLakeRepository):
         fetched_at: datetime | None = None,
         source_lineage: str = 'live_source',
     ) -> list[StoredObject]:
+        recovery_candidate_raw_sha256 = hashlib.sha256(extracted.raw_response).hexdigest()
+        partial_recovery = False
+        if not force:
+            extracted, partial_recovery = self._recover_equivalent_partial_bronze(extracted)
+
         draw_date = extracted.result.draw_date
         prefix = self._bronze_prefix(draw_date)
         raw_sha256 = hashlib.sha256(extracted.raw_response).hexdigest()
@@ -416,13 +421,17 @@ class SouthernDataLakeRepository(DataLakeRepository):
             hashlib.sha256(extracted.fallback_response).hexdigest() if extracted.fallback_response is not None else None
         )
         station_codes = [station.station_code for station in extracted.result.stations]
+        observation_time = fetched_at or datetime.now(UTC)
         metadata = {
             'run_id': run_id,
             'region': self.region.value,
             'draw_date': draw_date.isoformat(),
             'source_url': extracted.result.source_url,
             'source_lineage': source_lineage,
-            'fetched_at': (fetched_at or datetime.now(UTC)).isoformat(),
+            'fetched_at': None if partial_recovery else observation_time.isoformat(),
+            'recovered_at': observation_time.isoformat() if partial_recovery else None,
+            'partial_recovery': 'canonical_result_match' if partial_recovery else None,
+            'recovery_candidate_raw_sha256': recovery_candidate_raw_sha256 if partial_recovery else None,
             'raw_sha256': raw_sha256,
             'fallback_source_url': extracted.fallback_url,
             'fallback_raw_sha256': fallback_raw_sha256,
@@ -451,6 +460,8 @@ class SouthernDataLakeRepository(DataLakeRepository):
             'fallback_source_url': extracted.fallback_url,
             'fallback_raw_sha256': fallback_raw_sha256,
             'station_codes': station_codes,
+            'partial_recovery': 'canonical_result_match' if partial_recovery else None,
+            'recovery_candidate_raw_sha256': recovery_candidate_raw_sha256 if partial_recovery else None,
         }
         return [
             _put_immutable_bronze_object(
@@ -464,6 +475,41 @@ class SouthernDataLakeRepository(DataLakeRepository):
             )
             for key, payload in zip(keys, payloads, strict=True)
         ]
+
+    def _recover_equivalent_partial_bronze(
+        self,
+        extracted: SouthernExtractedResult,
+    ) -> tuple[SouthernExtractedResult, bool]:
+        """Reuse immutable partial artifacts only when their canonical result matches."""
+
+        prefix = self._bronze_prefix(extracted.result.draw_date)
+        response_key = f'{prefix}/response.html'
+        parsed_key = f'{prefix}/parsed-results.json'
+        metadata_key = f'{prefix}/metadata.json'
+        if self.store.exists(metadata_key) or not all(self.store.exists(key) for key in (response_key, parsed_key)):
+            return extracted, False
+
+        try:
+            existing_result = SouthernDailyResult.model_validate_json(self.store.get_bytes(parsed_key))
+        except ValueError:
+            return extracted, False
+        if existing_result != extracted.result:
+            return extracted, False
+
+        fallback_key = f'{prefix}/fallback-response.html'
+        existing_fallback = self.store.exists(fallback_key)
+        if existing_fallback and extracted.fallback_response is None:
+            return extracted, False
+        fallback_response = self.store.get_bytes(fallback_key) if existing_fallback else extracted.fallback_response
+        return (
+            SouthernExtractedResult(
+                raw_response=self.store.get_bytes(response_key),
+                result=existing_result,
+                fallback_response=fallback_response,
+                fallback_url=extracted.fallback_url,
+            ),
+            True,
+        )
 
     def upsert_silver_draw_results(self, dataframe: pd.DataFrame) -> list[StoredObject]:
         return self._write_partitioned_parquet(

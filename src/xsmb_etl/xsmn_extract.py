@@ -51,7 +51,11 @@ FALLBACK_ROW_GROUPS = {
 }
 
 
-class TruncatedSpecialPrizeError(PrizeCountError):
+class RecoverableHistoricalResultError(PrizeCountError):
+    """The primary historical page is malformed in a strictly reconcilable way."""
+
+
+class TruncatedSpecialPrizeError(RecoverableHistoricalResultError):
     """The primary historical page lost the first special-prize digit."""
 
 
@@ -89,7 +93,7 @@ class SouthernResultExtractor(ResultExtractor):
         try:
             result = parse_southern_result_page(raw_response, selected_date=selected_date, source_url=url)
             return SouthernExtractedResult(raw_response=raw_response, result=result)
-        except TruncatedSpecialPrizeError:
+        except RecoverableHistoricalResultError:
             fallback_url = self.build_fallback_source_url(selected_date)
             fallback_http_response = self._get_with_retry(fallback_url)
             fallback_response = bytes(fallback_http_response.content)
@@ -100,7 +104,7 @@ class SouthernResultExtractor(ResultExtractor):
                 selected_date=selected_date,
                 source_url=fallback_url,
             )
-            result = reconcile_truncated_southern_page(
+            result = reconcile_historical_southern_page(
                 raw_response,
                 fallback_result=fallback_result,
                 selected_date=selected_date,
@@ -222,11 +226,12 @@ def _build_southern_result(
                 )
             )
         except ValueError as exc:
-            error_type = (
-                TruncatedSpecialPrizeError
-                if str(exc) == 'special value must contain exactly 6 digits' and _has_five_digit_special(station.groups)
-                else PrizeCountError
-            )
+            if str(exc) == 'special value must contain exactly 6 digits' and _has_five_digit_special(station.groups):
+                error_type = TruncatedSpecialPrizeError
+            elif _has_recoverable_historical_values(station.groups):
+                error_type = RecoverableHistoricalResultError
+            else:
+                error_type = PrizeCountError
             raise error_type(f'invalid {station.station_name} result: {exc}') from exc
 
     try:
@@ -300,14 +305,14 @@ def parse_southern_fallback_page(
     return _build_southern_result(tuple(stations), selected_date=selected_date, source_url=source_url)
 
 
-def reconcile_truncated_southern_page(
+def reconcile_historical_southern_page(
     raw_response: bytes,
     *,
     fallback_result: SouthernDailyResult,
     selected_date: date,
     source_url: str,
 ) -> SouthernDailyResult:
-    """Restore only the missing special prefix after full cross-source comparison."""
+    """Repair only proven historical corruption after full cross-source comparison."""
 
     primary_stations = _primary_station_values(
         raw_response,
@@ -315,29 +320,40 @@ def reconcile_truncated_southern_page(
         source_url=source_url,
     )
     fallback_by_primary_code = _match_fallback_stations(primary_stations, fallback_result)
+    daywide_special_repair = _daywide_special_truncation_is_consistent(
+        primary_stations,
+        fallback_by_primary_code,
+    )
 
     reconciled: list[_StationPageValues] = []
     for primary in primary_stations:
         fallback = fallback_by_primary_code[primary.station_code]
         fallback_groups = _groups_from_station(fallback)
+        repaired_groups: set[SouthernPrizeGroup] = set()
+        if _small_prizes_are_transposed(primary.groups, fallback_groups):
+            repaired_groups.update((SouthernPrizeGroup.PRIZE8, SouthernPrizeGroup.PRIZE7))
+
+        groups = {group: list(values) for group, values in primary.groups.items()}
         for group in SouthernPrizeGroup:
             primary_values = primary.groups.get(group.value, [])
             fallback_values = fallback_groups[group.value]
-            if group is SouthernPrizeGroup.SPECIAL:
-                matches = (
-                    len(primary_values) == len(fallback_values) == 1
-                    and len(primary_values[0]) == 5
-                    and fallback_values[0].endswith(primary_values[0])
-                )
-            else:
-                matches = primary_values == fallback_values
-            if not matches:
-                raise SourceReconciliationError(
-                    f'primary and fallback XSMN values differ for {primary.station_code} {group.value}'
-                )
+            if primary_values == fallback_values:
+                continue
+            if group in repaired_groups:
+                groups[group.value] = fallback_values
+                continue
+            if group is SouthernPrizeGroup.SPECIAL and (
+                _is_truncated_special(primary_values, fallback_values) or daywide_special_repair
+            ):
+                groups[group.value] = fallback_values
+                continue
+            if _values_match_except_placeholders(primary_values, fallback_values):
+                groups[group.value] = fallback_values
+                continue
+            raise SourceReconciliationError(
+                f'primary and fallback XSMN values differ for {primary.station_code} {group.value}'
+            )
 
-        groups = {group: list(values) for group, values in primary.groups.items()}
-        groups[SouthernPrizeGroup.SPECIAL.value] = fallback_groups[SouthernPrizeGroup.SPECIAL.value]
         reconciled.append(
             _StationPageValues(
                 station_code=primary.station_code,
@@ -386,6 +402,81 @@ def _groups_from_station(station: SouthernStationResult) -> dict[str, list[str]]
 def _has_five_digit_special(groups: dict[str, list[str]]) -> bool:
     values = groups.get(SouthernPrizeGroup.SPECIAL.value, [])
     return len(values) == 1 and len(values[0]) == 5 and values[0].isascii() and values[0].isdigit()
+
+
+def _has_recoverable_historical_values(groups: dict[str, list[str]]) -> bool:
+    return any(_is_placeholder(value) for values in groups.values() for value in values) or (
+        len(groups.get(SouthernPrizeGroup.PRIZE8.value, [])) == 1
+        and len(groups.get(SouthernPrizeGroup.PRIZE7.value, [])) == 1
+        and _has_ascii_digit_width(groups[SouthernPrizeGroup.PRIZE8.value][0], 3)
+        and _has_ascii_digit_width(groups[SouthernPrizeGroup.PRIZE7.value][0], 2)
+    )
+
+
+def _small_prizes_are_transposed(
+    primary_groups: dict[str, list[str]],
+    fallback_groups: dict[str, list[str]],
+) -> bool:
+    primary_prize8 = primary_groups.get(SouthernPrizeGroup.PRIZE8.value, [])
+    primary_prize7 = primary_groups.get(SouthernPrizeGroup.PRIZE7.value, [])
+    fallback_prize8 = fallback_groups[SouthernPrizeGroup.PRIZE8.value]
+    fallback_prize7 = fallback_groups[SouthernPrizeGroup.PRIZE7.value]
+    return (
+        len(primary_prize8) == len(primary_prize7) == len(fallback_prize8) == len(fallback_prize7) == 1
+        and primary_prize8 == fallback_prize7
+        and primary_prize7 == fallback_prize8
+    )
+
+
+def _is_truncated_special(primary_values: list[str], fallback_values: list[str]) -> bool:
+    return (
+        len(primary_values) == len(fallback_values) == 1
+        and _has_ascii_digit_width(primary_values[0], 5)
+        and _has_ascii_digit_width(fallback_values[0], 6)
+        and fallback_values[0].endswith(primary_values[0])
+    )
+
+
+def _daywide_special_truncation_is_consistent(
+    primary_stations: tuple[_StationPageValues, ...],
+    fallback_by_primary_code: dict[str, SouthernStationResult],
+) -> bool:
+    """Allow one damaged suffix when a four-station page is otherwise consistently truncated."""
+
+    suffix_matches = 0
+    if len(primary_stations) < 4:
+        return False
+    for primary in primary_stations:
+        fallback_groups = _groups_from_station(fallback_by_primary_code[primary.station_code])
+        primary_values = primary.groups.get(SouthernPrizeGroup.SPECIAL.value, [])
+        fallback_values = fallback_groups[SouthernPrizeGroup.SPECIAL.value]
+        if not (
+            len(primary_values) == len(fallback_values) == 1
+            and _has_ascii_digit_width(primary_values[0], 5)
+            and _has_ascii_digit_width(fallback_values[0], 6)
+        ):
+            return False
+        suffix_matches += fallback_values[0].endswith(primary_values[0])
+    return suffix_matches >= len(primary_stations) - 1
+
+
+def _values_match_except_placeholders(primary_values: list[str], fallback_values: list[str]) -> bool:
+    return (
+        len(primary_values) == len(fallback_values)
+        and any(_is_placeholder(value) for value in primary_values)
+        and all(
+            primary == fallback or _is_placeholder(primary)
+            for primary, fallback in zip(primary_values, fallback_values)
+        )
+    )
+
+
+def _is_placeholder(value: str) -> bool:
+    return bool(value) and set(value) == {'.'}
+
+
+def _has_ascii_digit_width(value: str, width: int) -> bool:
+    return len(value) == width and value.isascii() and value.isdigit()
 
 
 def _fallback_represented_date(soup: BeautifulSoup) -> date | None:

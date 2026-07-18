@@ -12,6 +12,7 @@ def test_local_settings_do_not_require_r2_credentials() -> None:
 
     assert settings.etl_env == 'local'
     assert str(settings.source_base_url).rstrip('/') == 'https://xoso.com.vn'
+    assert str(settings.xsmn_fallback_base_url).rstrip('/') == 'https://xskt.com.vn'
     assert settings.resolved_r2_endpoint_url is None
 
 
@@ -23,6 +24,7 @@ def test_env_example_loads_with_blank_optional_r2_values() -> None:
     assert settings.r2_endpoint_url is None
     assert settings.r2_xsmn_bucket_name == 'xsmn-data-lake'
     assert settings.local_xsmn_output_dir == Path('output-xsmn')
+    assert str(settings.xsmn_fallback_base_url).rstrip('/') == 'https://xskt.com.vn'
 
 
 def test_r2_endpoint_is_derived_without_exposing_secret() -> None:

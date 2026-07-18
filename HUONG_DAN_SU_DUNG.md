@@ -67,6 +67,7 @@ Một token dùng chung cho cả hai bucket:
 ```dotenv
 ETL_ENV=production
 SOURCE_BASE_URL=https://xoso.com.vn
+XSMN_FALLBACK_BASE_URL=https://xskt.com.vn
 
 R2_ACCOUNT_ID=<cloudflare-account-id>
 R2_ACCESS_KEY_ID=<r2-access-key-id>
@@ -266,10 +267,13 @@ Vào tab **Variables → New repository variable**:
 | Variable | Giá trị gợi ý |
 |---|---|
 | `SOURCE_BASE_URL` | `https://xoso.com.vn` |
+| `XSMN_FALLBACK_BASE_URL` | `https://xskt.com.vn`; chỉ dùng để đối chiếu lịch sử |
 | `R2_PUBLIC_BASE_URL` | URL public Gold XSMB, nếu có |
 | `R2_XSMN_PUBLIC_BASE_URL` | URL public Gold XSMN, nếu có |
 
 Credential luôn phải là Secret, không phải Variable, vì Variable có thể hiện rõ trong log.
+
+Fallback chỉ được gọi khi nguồn chính trả giải đặc biệt XSMN lịch sử có đúng 5 chữ số. Pipeline đối chiếu tập đài, toàn bộ 17 giải còn lại và 5 số cuối trước khi chấp nhận chữ số đầu từ nguồn độc lập; không tự thêm số `0`. Hai raw response, URL và hash được giữ trong Bronze để audit.
 
 ### 8.4 Chạy thử bằng giao diện GitHub
 

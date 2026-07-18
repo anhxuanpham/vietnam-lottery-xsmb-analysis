@@ -81,6 +81,7 @@ jobs:
       R2_XSMN_ENDPOINT_URL: ${{ secrets.R2_XSMN_ENDPOINT_URL }}
       R2_XSMN_PUBLIC_BASE_URL: ${{ vars.R2_XSMN_PUBLIC_BASE_URL }}
       SOURCE_BASE_URL: ${{ vars.SOURCE_BASE_URL }}
+      XSMN_FALLBACK_BASE_URL: ${{ vars.XSMN_FALLBACK_BASE_URL }}
       FORCE: ${{ inputs.force }}
     steps:
       - name: Checkout

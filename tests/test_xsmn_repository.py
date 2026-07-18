@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import json
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,30 @@ def test_southern_repository_writes_station_grain_bronze_and_silver(tmp_path) ->
     assert draw_objects[0].key == 'silver/draw-results/year=2026/month=07/draw-results.parquet'
     assert loto_objects[0].key == 'silver/loto-daily/year=2026/month=07/loto-daily.parquet'
     assert repository.read_all_silver_draw_results().shape == (54, 15)
+
+
+def test_southern_repository_preserves_reconciliation_evidence(tmp_path) -> None:
+    repository = SouthernDataLakeRepository(LocalObjectStore(tmp_path), gold_cache_control='no-cache')
+    base = _extracted()
+    extracted = SouthernExtractedResult(
+        raw_response=b'primary historical response',
+        result=base.result,
+        fallback_response=b'independent fallback response',
+        fallback_url='https://fallback.test/ngay/16-07-2026',
+    )
+
+    objects = repository.write_bronze(extracted, run_id='run-fallback')
+    metadata = json.loads(
+        repository.store.get_bytes('bronze/source=xoso/year=2026/month=07/date=2026-07-16/metadata.json')
+    )
+
+    assert len(objects) == 4
+    assert objects[2].key.endswith('/fallback-response.html')
+    assert metadata['fallback_source_url'] == extracted.fallback_url
+    assert metadata['fallback_raw_sha256']
+    assert metadata['reconciliation'] == 'full_station_prize_comparison'
+    assert repository.load_bronze(date(2026, 7, 16)) == extracted
+    assert repository.bronze_objects(date(2026, 7, 16)) == objects
 
 
 def test_southern_repository_rejects_changed_immutable_bronze(tmp_path) -> None:

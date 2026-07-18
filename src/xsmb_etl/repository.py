@@ -377,16 +377,28 @@ class SouthernDataLakeRepository(DataLakeRepository):
 
     def bronze_objects(self, draw_date: date) -> list[StoredObject]:
         prefix = self._bronze_prefix(draw_date)
-        return [
-            self.store.head(f'{prefix}/{filename}')
-            for filename in ('response.html', 'parsed-results.json', 'metadata.json')
-        ]
+        filenames = ['response.html', 'parsed-results.json']
+        fallback_key = f'{prefix}/fallback-response.html'
+        if self.store.exists(fallback_key):
+            filenames.append('fallback-response.html')
+        filenames.append('metadata.json')
+        return [self.store.head(f'{prefix}/{filename}') for filename in filenames]
 
     def load_bronze(self, draw_date: date) -> SouthernExtractedResult:
         prefix = self._bronze_prefix(draw_date)
         raw_response = self.store.get_bytes(f'{prefix}/response.html')
         result = SouthernDailyResult.model_validate_json(self.store.get_bytes(f'{prefix}/parsed-results.json'))
-        return SouthernExtractedResult(raw_response=raw_response, result=result)
+        metadata = json.loads(self.store.get_bytes(f'{prefix}/metadata.json'))
+        fallback_url = metadata.get('fallback_source_url')
+        fallback_response = (
+            self.store.get_bytes(f'{prefix}/fallback-response.html') if isinstance(fallback_url, str) else None
+        )
+        return SouthernExtractedResult(
+            raw_response=raw_response,
+            result=result,
+            fallback_response=fallback_response,
+            fallback_url=fallback_url if isinstance(fallback_url, str) else None,
+        )
 
     def write_bronze(
         self,
@@ -399,8 +411,10 @@ class SouthernDataLakeRepository(DataLakeRepository):
     ) -> list[StoredObject]:
         draw_date = extracted.result.draw_date
         prefix = self._bronze_prefix(draw_date)
-        keys = [f'{prefix}/response.html', f'{prefix}/parsed-results.json', f'{prefix}/metadata.json']
         raw_sha256 = hashlib.sha256(extracted.raw_response).hexdigest()
+        fallback_raw_sha256 = (
+            hashlib.sha256(extracted.fallback_response).hexdigest() if extracted.fallback_response is not None else None
+        )
         station_codes = [station.station_code for station in extracted.result.stations]
         metadata = {
             'run_id': run_id,
@@ -410,10 +424,19 @@ class SouthernDataLakeRepository(DataLakeRepository):
             'source_lineage': source_lineage,
             'fetched_at': (fetched_at or datetime.now(UTC)).isoformat(),
             'raw_sha256': raw_sha256,
+            'fallback_source_url': extracted.fallback_url,
+            'fallback_raw_sha256': fallback_raw_sha256,
+            'reconciliation': 'full_station_prize_comparison' if extracted.fallback_response is not None else None,
             'station_count': len(station_codes),
             'station_codes': station_codes,
         }
-        payloads = [extracted.raw_response, _model_json_bytes(extracted.result), _json_bytes(metadata)]
+        keys = [f'{prefix}/response.html', f'{prefix}/parsed-results.json']
+        payloads = [extracted.raw_response, _model_json_bytes(extracted.result)]
+        if extracted.fallback_response is not None:
+            keys.append(f'{prefix}/fallback-response.html')
+            payloads.append(extracted.fallback_response)
+        keys.append(f'{prefix}/metadata.json')
+        payloads.append(_json_bytes(metadata))
         object_metadata = {
             'run-id': run_id,
             'region': self.region.value,
@@ -425,6 +448,8 @@ class SouthernDataLakeRepository(DataLakeRepository):
             'source_url': extracted.result.source_url,
             'source_lineage': source_lineage,
             'raw_sha256': raw_sha256,
+            'fallback_source_url': extracted.fallback_url,
+            'fallback_raw_sha256': fallback_raw_sha256,
             'station_codes': station_codes,
         }
         return [

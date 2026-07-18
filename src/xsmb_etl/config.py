@@ -33,6 +33,7 @@ class Settings(BaseSettings):
 
     etl_env: EtlEnvironment = EtlEnvironment.LOCAL
     source_base_url: HttpUrl = HttpUrl('https://xoso.com.vn')
+    xsmn_fallback_base_url: HttpUrl = HttpUrl('https://xskt.com.vn')
     http_timeout_seconds: float = Field(default=30.0, gt=0)
     http_max_retries: int = Field(default=3, ge=0)
     http_retry_backoff_seconds: float = Field(default=1.0, ge=0)

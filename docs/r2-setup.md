@@ -75,6 +75,8 @@ Under repository Settings → Secrets and variables → Actions, create:
 
 Only add the optional `R2_XSMN_*` secrets when using a separate XSMN account/token. Optional repository variables are `R2_PUBLIC_BASE_URL` and `SOURCE_BASE_URL`.
 
+`XSMN_FALLBACK_BASE_URL` is also optional and defaults to `https://xskt.com.vn`. It is not a credential. Set it only when the independent historical reconciliation source must be overridden.
+
 CI never receives production secrets. The scheduled/manual daily workflow receives them and has read-only repository permissions.
 
 ## 5. Publish curated Gold only

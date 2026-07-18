@@ -17,6 +17,8 @@ A source page that explicitly states “không mở thưởng” writes a `no_dr
 
 XSMN range backfill validates and upserts Bronze/Silver one date at a time, then rebuilds Silver Loto and publishes Gold once after the batch. Until that final publication succeeds, the previous `manifests/latest.json` remains the consumer boundary. An interrupted run is safe to repeat because completed Bronze objects and Silver business keys are reused.
 
+Some historical primary pages omit the first digit of all station special prizes. Only this exact five-digit-width failure activates the independent XSMN fallback source. The result is accepted only when station codes, all 17 non-special prizes, and the five-digit special suffix agree. Reconciled Bronze retains `response.html`, `fallback-response.html`, both source URLs and hashes, and `reconciliation=full_station_prize_comparison`. A disagreement remains `failed`; the pipeline never guesses or zero-pads the missing digit.
+
 Bronze uses an atomic conditional PUT. When an interrupted or concurrent run already created the same object, the repository verifies the stored payload and safely resumes. A different payload remains an immutable-Bronze conflict, is reported as `failed`, and does not stop later dates. Failure reporting does not make another manifest-list request, so a secondary R2 read cannot break the continuation path.
 
 ```bash

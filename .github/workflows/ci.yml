@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - develop
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install locked dependencies
+        run: uv sync --frozen --all-groups
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Test
+        run: uv run pytest
+
+      - name: Run local fixture pipeline
+        run: >-
+          uv run xsmb-etl run
+          --target-date 2026-07-16
+          --fixture tests/fixtures/valid-result-page.html
+          --output /tmp/xsmb-etl-ci
+
+      - name: Run local XSMN fixture pipeline
+        run: >-
+          uv run lottery-etl run
+          --region xsmn
+          --target-date 2026-07-16
+          --fixture tests/fixtures/valid-xsmn-result-page.html
+          --output /tmp/xsmn-etl-ci

@@ -1,0 +1,108 @@
+name: Daily Vietnam Lottery ETL
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: Optional YYYY-MM-DD draw date
+        required: false
+      force:
+        description: Replace an existing successful date
+        type: boolean
+        default: false
+      region:
+        description: Data lake to run
+        type: choice
+        options:
+          - all
+          - xsmb
+          - xsmn
+        default: all
+  schedule:
+    - cron: "35 11 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  etl:
+    name: ETL (${{ matrix.region }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: vietnam-lottery-${{ matrix.region }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        region:
+          - xsmb
+          - xsmn
+    env:
+      ETL_ENV: production
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      R2_XSMN_BUCKET_NAME: ${{ secrets.R2_XSMN_BUCKET_NAME }}
+      R2_XSMN_ACCOUNT_ID: ${{ secrets.R2_XSMN_ACCOUNT_ID }}
+      R2_XSMN_ACCESS_KEY_ID: ${{ secrets.R2_XSMN_ACCESS_KEY_ID }}
+      R2_XSMN_SECRET_ACCESS_KEY: ${{ secrets.R2_XSMN_SECRET_ACCESS_KEY }}
+      R2_XSMN_ENDPOINT_URL: ${{ secrets.R2_XSMN_ENDPOINT_URL }}
+      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+      R2_XSMN_PUBLIC_BASE_URL: ${{ vars.R2_XSMN_PUBLIC_BASE_URL }}
+      SOURCE_BASE_URL: ${{ vars.SOURCE_BASE_URL }}
+      TARGET_DATE: ${{ inputs.target_date }}
+      FORCE: ${{ inputs.force }}
+      REQUESTED_REGION: ${{ inputs.region }}
+    steps:
+      - name: Select requested region
+        id: select
+        shell: bash
+        run: |
+          requested="${REQUESTED_REGION:-all}"
+          if [[ "$requested" == "all" || "$requested" == "${{ matrix.region }}" ]]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.select.outputs.should_run == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        if: steps.select.outputs.should_run == 'true'
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install locked runtime dependencies
+        if: steps.select.outputs.should_run == 'true'
+        run: uv sync --frozen --no-dev
+
+      - name: Run ETL
+        if: steps.select.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          command=(uv run lottery-etl run --storage r2 --region "${{ matrix.region }}")
+          if [[ -n "$TARGET_DATE" ]]; then
+            command+=(--target-date "$TARGET_DATE")
+          fi
+          if [[ "$FORCE" == "true" ]]; then
+            command+=(--force)
+          fi
+          "${command[@]}" | tee etl-result.json
+
+      - name: Write job summary
+        if: always() && steps.select.outputs.should_run == 'true'
+        shell: bash
+        run: |
+          echo "### Daily Vietnam Lottery ETL (${{ matrix.region }})" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f etl-result.json ]]; then
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat etl-result.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "ETL failed before producing a result manifest." >> "$GITHUB_STEP_SUMMARY"
+          fi

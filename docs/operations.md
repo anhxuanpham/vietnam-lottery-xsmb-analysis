@@ -5,7 +5,7 @@ Every operation targets one independent lake with `--region xsmb`, `--region xsm
 ## Daily success
 
 1. The source page matches the requested date.
-2. XSMB contains 27 values; every XSMN/XSMT station contains 18 values. XSMN has three/four stations per page and XSMT has two/three.
+2. XSMB contains 27 values; every XSMN/XSMT station contains 18 values. XSMN has three/four stations per page and XSMT normally has two/three. Four documented 2021 closure dates accept one exact drawing station only: `2021-07-27 QNA`, `2021-08-03 QNA`, `2021-08-06 GL`, and `2021-08-18 KH`; every other one-station page remains a critical failure.
 3. Critical quality checks pass at the correct date/station grain.
 4. Bronze is written once; monthly Silver and all Gold latest objects are updated in that region's lake.
 5. A run manifest and snapshot manifest are written.

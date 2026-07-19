@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -23,19 +24,32 @@ def build_southern_quality_report(
     statuses: dict[date, DrawStatus] | None = None,
     today: date | None = None,
     region: LotteryRegion = LotteryRegion.XSMN,
+    documented_partial_draws: Mapping[date, frozenset[str]] | None = None,
 ) -> QualityReport:
     today = today or datetime.now(UTC).date()
     target_dates = tuple(sorted({result.draw_date for result in results}))
     station_results = [station for result in results for station in result.stations]
     expected_station_counts = {2, 3} if region is LotteryRegion.XSMT else {3, 4}
+    documented_partial_draws = documented_partial_draws or {}
     region_label = region.value.upper()
+    station_sets_valid = bool(results) and all(
+        ({station.station_code for station in result.stations} == documented_partial_draws[result.draw_date])
+        if result.draw_date in documented_partial_draws
+        else len(result.stations) in expected_station_counts
+        for result in results
+    )
+    applied_partial_draws = sorted(
+        result.draw_date.isoformat() for result in results if result.draw_date in documented_partial_draws
+    )
     checks: list[QualityCheck] = [
         _check('requested-date-validated', bool(results), 'source pages passed selected-date validation'),
         _check(
             'station-count-per-day',
-            bool(results) and all(len(result.stations) in expected_station_counts for result in results),
+            station_sets_valid,
             f'each {region_label} date contains '
-            f'{min(expected_station_counts)} or {max(expected_station_counts)} stations',
+            f'{min(expected_station_counts)} or {max(expected_station_counts)} stations, '
+            'or matches an exact documented partial-draw station set',
+            details={'documented_partial_draw_dates': applied_partial_draws},
         ),
         _check(
             'station-code-unique-per-day',

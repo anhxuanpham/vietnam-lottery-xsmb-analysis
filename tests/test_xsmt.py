@@ -17,6 +17,7 @@ from xsmb_etl.xsmt_extract import (
     parse_central_result_page,
 )
 from xsmb_etl.xsmt_marts import build_central_gold_tables
+from xsmb_etl.xsmt_models import CentralDailyResult
 from xsmb_etl.xsmt_pipeline import CentralPipeline
 from xsmb_etl.xsmt_quality import build_central_quality_report
 from xsmb_etl.xsmt_transform import central_draw_results_frame, central_loto_daily_frame
@@ -31,6 +32,36 @@ def _extracted() -> CentralExtractedResult:
     raw = FIXTURE.read_bytes()
     result = parse_central_result_page(raw, selected_date=TARGET_DATE, source_url=SOURCE_URL)
     return CentralExtractedResult(raw_response=raw, result=result)
+
+
+def _one_station_result(draw_date: date, station_code: str) -> CentralDailyResult:
+    source_url = f'https://xoso.com.vn/xsmt-{draw_date:%d-%m-%Y}.html'
+    station = (
+        _extracted()
+        .result.stations[0]
+        .model_copy(
+            update={
+                'draw_date': draw_date,
+                'station_code': station_code,
+                'station_name': station_code,
+                'source_url': source_url,
+            }
+        )
+    )
+    return CentralDailyResult(draw_date=draw_date, source_url=source_url, stations=(station,))
+
+
+def _station_count_check(results: list[CentralDailyResult]):
+    draw = central_draw_results_frame(results, 'run-xsmt')
+    loto = central_loto_daily_frame(draw, run_id='run-xsmt')
+    report = build_central_quality_report(
+        results,
+        draw,
+        loto,
+        run_id='run-xsmt',
+        today=date(2021, 8, 18),
+    )
+    return next(check for check in report.checks if check.name == 'station-count-per-day')
 
 
 def test_central_extractor_uses_xsmt_source_profiles() -> None:
@@ -77,6 +108,39 @@ def test_central_transform_and_quality_use_two_or_three_station_rule() -> None:
     assert next(check for check in report.checks if check.name == 'station-count-per-day').passed
 
 
+def test_central_quality_accepts_only_documented_2021_partial_draws() -> None:
+    results = [
+        _one_station_result(date(2021, 7, 27), 'QNA'),
+        _one_station_result(date(2021, 8, 3), 'QNA'),
+        _one_station_result(date(2021, 8, 6), 'GL'),
+        _one_station_result(date(2021, 8, 18), 'KH'),
+    ]
+
+    check = _station_count_check(results)
+
+    assert check.passed
+    assert check.details['documented_partial_draw_dates'] == [
+        '2021-07-27',
+        '2021-08-03',
+        '2021-08-06',
+        '2021-08-18',
+    ]
+
+
+@pytest.mark.parametrize(
+    ('draw_date', 'station_code'),
+    [
+        (date(2021, 7, 28), 'QNA'),
+        (date(2021, 7, 27), 'DNA'),
+    ],
+)
+def test_central_quality_rejects_undocumented_or_wrong_single_station(
+    draw_date: date,
+    station_code: str,
+) -> None:
+    assert not _station_count_check([_one_station_result(draw_date, station_code)]).passed
+
+
 def test_central_pipeline_publishes_an_independent_manifest(tmp_path) -> None:
     extracted = _extracted()
 
@@ -92,3 +156,20 @@ def test_central_pipeline_publishes_an_independent_manifest(tmp_path) -> None:
     assert result.status == 'success'
     assert repository.latest_manifest().region is LotteryRegion.XSMT
     assert (tmp_path / 'gold/latest/dim-station.parquet').is_file()
+
+
+def test_central_pipeline_accepts_documented_partial_draw(tmp_path) -> None:
+    target_date = date(2021, 7, 27)
+    result = _one_station_result(target_date, 'QNA')
+
+    class FixtureExtractor:
+        def extract(self, selected_date: date) -> CentralExtractedResult:
+            assert selected_date == target_date
+            return CentralExtractedResult(raw_response=b'documented partial draw', result=result)
+
+    repository = CentralDataLakeRepository(LocalObjectStore(tmp_path), gold_cache_control='no-cache')
+
+    run = CentralPipeline(repository, FixtureExtractor()).run(target_date)
+
+    assert run.status == 'success'
+    assert repository.latest_manifest().target_date == target_date

@@ -46,6 +46,7 @@ a { color: inherit; text-decoration: none; }
 .latest-card { background: var(--ink); color: var(--white); padding: 28px; box-shadow: 22px 22px 0 var(--red); transform: rotate(0.4deg); }
 .latest-card-head { display: flex; justify-content: space-between; padding-bottom: 18px; border-bottom: 1px solid rgba(255,255,255,.16); font: 600 10px var(--font-geist-mono); text-transform: uppercase; letter-spacing: .1em; }
 .latest-card-head span { color: #aaa79f; }
+.latest-station { margin: -11px 0 17px; color: #aaa79f; font: 600 9px var(--font-geist-mono); text-align: right; text-transform: uppercase; letter-spacing: .1em; }
 .special-result { display: flex; align-items: flex-end; justify-content: space-between; padding: 28px 0 24px; }
 .special-result small { width: 80px; color: #aaa79f; line-height: 1.35; }
 .special-result strong { font: 760 92px/.75 var(--font-geist-mono); color: var(--acid); letter-spacing: -.1em; }

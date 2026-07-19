@@ -1,0 +1,122 @@
+name: Publish Lottery Dashboard Data
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Daily Vietnam Lottery ETL
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lottery-dashboard-publish
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ETL_ENV: production
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      R2_XSMN_BUCKET_NAME: ${{ secrets.R2_XSMN_BUCKET_NAME }}
+      R2_XSMN_ACCOUNT_ID: ${{ secrets.R2_XSMN_ACCOUNT_ID }}
+      R2_XSMN_ACCESS_KEY_ID: ${{ secrets.R2_XSMN_ACCESS_KEY_ID }}
+      R2_XSMN_SECRET_ACCESS_KEY: ${{ secrets.R2_XSMN_SECRET_ACCESS_KEY }}
+      R2_XSMN_ENDPOINT_URL: ${{ secrets.R2_XSMN_ENDPOINT_URL }}
+      R2_XSMT_BUCKET_NAME: ${{ secrets.R2_XSMT_BUCKET_NAME }}
+      R2_XSMT_ACCOUNT_ID: ${{ secrets.R2_XSMT_ACCOUNT_ID }}
+      R2_XSMT_ACCESS_KEY_ID: ${{ secrets.R2_XSMT_ACCESS_KEY_ID }}
+      R2_XSMT_SECRET_ACCESS_KEY: ${{ secrets.R2_XSMT_SECRET_ACCESS_KEY }}
+      R2_XSMT_ENDPOINT_URL: ${{ secrets.R2_XSMT_ENDPOINT_URL }}
+      DASHBOARD_INGEST_URL: ${{ vars.DASHBOARD_INGEST_URL }}
+      DASHBOARD_INGEST_TOKEN: ${{ secrets.DASHBOARD_INGEST_TOKEN }}
+      DASHBOARD_SITES_BYPASS_TOKEN: ${{ secrets.DASHBOARD_SITES_BYPASS_TOKEN }}
+    steps:
+      - name: Check dashboard configuration
+        id: config
+        shell: bash
+        run: |
+          if [[ -n "$DASHBOARD_INGEST_URL" && -n "$DASHBOARD_INGEST_TOKEN" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Dashboard publishing is disabled until DASHBOARD_INGEST_URL and DASHBOARD_INGEST_TOKEN are set."
+            if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "A manual publish requires dashboard ingest configuration." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Checkout
+        if: steps.config.outputs.ready == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        if: steps.config.outputs.ready == 'true'
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install locked runtime dependencies
+        if: steps.config.outputs.ready == 'true'
+        run: uv sync --frozen --no-dev
+
+      - name: Verify published Gold metadata
+        if: steps.config.outputs.ready == 'true'
+        run: uv run lottery-etl status --storage r2 --region all --json | tee lake-status.json
+
+      - name: Export and publish compact payloads
+        if: steps.config.outputs.ready == 'true'
+        shell: bash
+        run: |
+          request_headers=(
+            -H "Authorization: Bearer $DASHBOARD_INGEST_TOKEN"
+            -H "Content-Type: application/json"
+          )
+          if [[ -n "$DASHBOARD_SITES_BYPASS_TOKEN" ]]; then
+            request_headers+=(
+              -H "OAI-Sites-Authorization: Bearer $DASHBOARD_SITES_BYPASS_TOKEN"
+            )
+          fi
+
+          for region in xsmb xsmn xsmt; do
+            output="/tmp/${region}-dashboard.json"
+            uv run python scripts/export_serving_data.py \
+              --storage r2 \
+              --region "$region" \
+              --output "$output"
+            curl \
+              --fail-with-body \
+              --show-error \
+              --silent \
+              --retry 3 \
+              --retry-all-errors \
+              --request PUT \
+              "${request_headers[@]}" \
+              --data-binary "@$output" \
+              "${DASHBOARD_INGEST_URL}?region=${region}"
+          done
+
+      - name: Write job summary
+        if: always()
+        shell: bash
+        run: |
+          echo "### Lottery dashboard publish" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ steps.config.outputs.ready }}" != "true" ]]; then
+            echo "Skipped: dashboard ingest has not been configured." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "${{ job.status }}" == "success" ]]; then
+            echo "Published compact XSMB, XSMN, and XSMT payloads." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Dashboard publishing failed. Inspect the export/upload step." >> "$GITHUB_STEP_SUMMARY"
+          fi

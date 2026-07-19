@@ -1,23 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-
-type Draw = {
-  date: string;
-  specialTail: string;
-  numbers: string[];
-};
-
-type DashboardData = {
-  region: "xsmb";
-  source: string;
-  range: { from: string; to: string };
-  drawCount: number;
-  resultCount: number;
-  latest: Draw;
-  fullFrequency: Record<string, number>;
-  draws: Draw[];
-};
+import {
+  LOTTERY_REGIONS,
+  normalizeLotteryDashboardData,
+  regionName,
+  type LotteryDashboardData,
+  type LotteryDraw,
+  type LotteryRegion,
+} from "@/lottery-contract";
 
 type ModelKind = "frequency" | "gap" | "balanced";
 
@@ -39,7 +30,7 @@ const percentFormatter = new Intl.NumberFormat("vi-VN", {
   maximumFractionDigits: 1,
 });
 
-function frequencies(draws: Draw[]) {
+function frequencies(draws: LotteryDraw[]) {
   const counts = Object.fromEntries(
     Array.from({ length: 100 }, (_, index) => [String(index).padStart(2, "0"), 0]),
   ) as Record<string, number>;
@@ -50,7 +41,7 @@ function frequencies(draws: Draw[]) {
   return counts;
 }
 
-function gaps(draws: Draw[]) {
+function gaps(draws: LotteryDraw[]) {
   const latestIndex = draws.length - 1;
   const lastSeen = Object.fromEntries(
     Array.from({ length: 100 }, (_, index) => [String(index).padStart(2, "0"), -1]),
@@ -68,7 +59,7 @@ function gaps(draws: Draw[]) {
   ) as Record<string, number>;
 }
 
-function pickNumbers(draws: Draw[], kind: ModelKind) {
+function pickNumbers(draws: LotteryDraw[], kind: ModelKind) {
   const counts = frequencies(draws);
   const drawGaps = gaps(draws);
   const maxFrequency = Math.max(...Object.values(counts), 1);
@@ -91,7 +82,7 @@ function pickNumbers(draws: Draw[], kind: ModelKind) {
     .map((item) => item.number);
 }
 
-function backtest(draws: Draw[], window: number, kind: ModelKind) {
+function backtest(draws: LotteryDraw[], window: number, kind: ModelKind) {
   const evaluationCount = Math.min(90, draws.length - Math.max(window, 30));
   if (evaluationCount <= 0) return { coverage: 0, lift: 0 };
 
@@ -130,32 +121,53 @@ function DashboardLoading() {
 }
 
 export default function Home() {
-  const [data, setData] = useState<DashboardData | null>(null);
+  const [region, setRegion] = useState<LotteryRegion>("xsmb");
+  const [data, setData] = useState<LotteryDashboardData | null>(null);
   const [error, setError] = useState("");
+  const [dataSource, setDataSource] = useState("");
+  const [selectedStation, setSelectedStation] = useState("xsmb");
   const [selectedWindow, setSelectedWindow] = useState(90);
   const [activeWindow, setActiveWindow] = useState(90);
   const [lastRun, setLastRun] = useState("Chưa chạy");
 
   useEffect(() => {
-    fetch("/data/xsmb-demo.json")
-      .then((response) => {
+    const controller = new AbortController();
+    fetch(`/api/lottery?region=${region}`, { signal: controller.signal })
+      .then(async (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        return response.json() as Promise<DashboardData>;
+        const payload: unknown = await response.json();
+        const normalized = normalizeLotteryDashboardData(payload, region);
+        if (!normalized) throw new Error("Invalid dashboard payload");
+        setDataSource(response.headers.get("x-lottery-source") ?? "api");
+        return normalized;
       })
-      .then(setData)
-      .catch(() => setError("Không thể nạp dữ liệu demo. Hãy chạy lại script export dữ liệu."));
-  }, []);
+      .then((nextData) => {
+        setData(nextData);
+        setSelectedStation(nextData.stations[0]?.code ?? "");
+        setSelectedWindow(90);
+        setActiveWindow(90);
+        setLastRun("Chưa chạy");
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === "AbortError") return;
+        setError(`Không thể nạp dữ liệu ${region.toUpperCase()} từ API.`);
+      });
+    return () => controller.abort();
+  }, [region]);
 
   const analysis = useMemo(() => {
     if (!data) return null;
-    const analysisDraws = data.draws.slice(-activeWindow);
+    const station = data.stations.find((item) => item.code === selectedStation) ?? data.stations[0];
+    if (!station) return null;
+    const filteredDraws = data.draws.filter((draw) => draw.stationCode === station.code);
+    const analysisDraws = filteredDraws.slice(-activeWindow);
     const counts = frequencies(analysisDraws);
-    const drawGaps = gaps(data.draws);
+    const drawGaps = gaps(filteredDraws);
     const sortedFrequency = Object.entries(counts).sort(
       ([numberA, countA], [numberB, countB]) => countB - countA || numberA.localeCompare(numberB),
     );
-    const maxFrequency = sortedFrequency[0]?.[1] ?? 1;
-    const models: ModelResult[] = [
+    const maxFrequency = Math.max(sortedFrequency[0]?.[1] ?? 0, 1);
+    const modelDefinitions: Array<Pick<ModelResult, "kind" | "name" | "eyebrow" | "description">> = [
       {
         kind: "frequency",
         name: "Tần suất",
@@ -174,8 +186,9 @@ export default function Home() {
         eyebrow: "Model 03 · 60/40 blend",
         description: "Kết hợp 60% tần suất và 40% khoảng vắng trên cùng cửa sổ dữ liệu.",
       },
-    ].map((model) => {
-      const result = backtest(data.draws, activeWindow, model.kind);
+    ];
+    const models: ModelResult[] = modelDefinitions.map((model) => {
+      const result = backtest(filteredDraws, activeWindow, model.kind);
       return {
         ...model,
         picks: pickNumbers(analysisDraws, model.kind),
@@ -184,8 +197,8 @@ export default function Home() {
       };
     });
 
-    const recentSeven = frequencies(data.draws.slice(-7));
-    const priorThirty = frequencies(data.draws.slice(-37, -7));
+    const recentSeven = frequencies(filteredDraws.slice(-7));
+    const priorThirty = frequencies(filteredDraws.slice(-37, -7));
     const momentum = Object.keys(counts)
       .map((number) => ({
         number,
@@ -196,6 +209,9 @@ export default function Home() {
 
     return {
       analysisDraws,
+      filteredDraws,
+      station,
+      evaluationCount: Math.max(0, Math.min(90, filteredDraws.length - Math.max(activeWindow, 30))),
       counts,
       drawGaps,
       maxFrequency,
@@ -206,7 +222,7 @@ export default function Home() {
       momentum,
       models,
     };
-  }, [activeWindow, data]);
+  }, [activeWindow, data, selectedStation]);
 
   if (error) {
     return (
@@ -218,6 +234,9 @@ export default function Home() {
   }
   if (!data || !analysis) return <DashboardLoading />;
 
+  const latestDraw = analysis.filteredDraws.at(-1) ?? data.draws.at(-1);
+  if (!latestDraw) return <DashboardLoading />;
+
   const runModels = () => {
     setActiveWindow(selectedWindow);
     setLastRun(
@@ -225,6 +244,14 @@ export default function Home() {
         new Date(),
       ),
     );
+  };
+
+  const chooseRegion = (nextRegion: LotteryRegion) => {
+    if (nextRegion === region) return;
+    setData(null);
+    setError("");
+    setSelectedStation("");
+    setRegion(nextRegion);
   };
 
   return (
@@ -243,12 +270,12 @@ export default function Home() {
           <a href="#heatmap">Heatmap</a>
           <a href="#health">Dữ liệu</a>
         </nav>
-        <div className="live-badge"><span /> Dataset local</div>
+        <div className="live-badge"><span /> {dataSource === "r2" ? "R2 live" : "Demo local"}</div>
       </header>
 
       <section className="hero" id="overview">
         <div className="hero-copy">
-          <p className="kicker">XSMB · PHÂN TÍCH MÔ TẢ</p>
+          <p className="kicker">{region.toUpperCase()} · {regionName(region).toUpperCase()} · PHÂN TÍCH MÔ TẢ</p>
           <h1>Đọc nhịp dữ liệu.<br /><em>Không đoán tương lai.</em></h1>
           <p className="hero-description">
             Chạy nhanh ba heuristic trên dữ liệu lịch sử, nhìn ngay tần suất, khoảng vắng và kết quả backtest.
@@ -262,40 +289,59 @@ export default function Home() {
         <div className="latest-card">
           <div className="latest-card-head">
             <span>Kết quả gần nhất</span>
-            <strong>{formatDate(data.latest.date)}</strong>
+            <strong>{formatDate(latestDraw.date)}</strong>
           </div>
           <div className="special-result">
             <small>Đuôi giải đặc biệt</small>
-            <strong>{data.latest.specialTail}</strong>
+            <strong>{latestDraw.specialTail}</strong>
           </div>
-          <div className="latest-grid" aria-label="27 kết quả loto gần nhất">
-            {data.latest.numbers.map((number, index) => (
+          <div className="latest-station">{latestDraw.stationName}</div>
+          <div className="latest-grid" aria-label={`${latestDraw.numbers.length} kết quả loto gần nhất`}>
+            {latestDraw.numbers.map((number, index) => (
               <span className={index === 0 ? "is-special" : ""} key={`${number}-${index}`}>{number}</span>
             ))}
           </div>
-          <p>27 kết quả · giữ nguyên số 0 ở đầu</p>
+          <p>{latestDraw.numbers.length} kết quả · giữ nguyên số 0 ở đầu</p>
         </div>
       </section>
 
       <section className="metrics" aria-label="Chỉ số dữ liệu">
-        <article><span>01</span><small>Tổng kỳ quay</small><strong>{numberFormatter.format(data.drawCount)}</strong><p>Từ tháng 10/2005</p></article>
-        <article><span>02</span><small>Kết quả quan sát</small><strong>{numberFormatter.format(data.resultCount)}</strong><p>27 kết quả mỗi kỳ</p></article>
+        <article><span>01</span><small>Tổng kỳ quay</small><strong>{numberFormatter.format(data.drawCount)}</strong><p>Từ {formatDate(data.range.from)}</p></article>
+        <article><span>02</span><small>Kết quả quan sát</small><strong>{numberFormatter.format(data.resultCount)}</strong><p>{latestDraw.numbers.length} kết quả mỗi kỳ / đài</p></article>
         <article><span>03</span><small>Cửa sổ mô hình</small><strong>{activeWindow} kỳ</strong><p>Đang được áp dụng</p></article>
-        <article><span>04</span><small>Backtest gần nhất</small><strong>90 kỳ</strong><p>Baseline ngẫu nhiên 10%</p></article>
+        <article><span>04</span><small>Backtest gần nhất</small><strong>{analysis.evaluationCount} kỳ</strong><p>Walk-forward · baseline 10%</p></article>
       </section>
 
       <section className="model-lab" id="models">
         <div className="section-heading">
           <div><p className="kicker">MODEL LAB</p><h2>Chạy thử các góc nhìn</h2></div>
-          <p>Coverage đo tỷ lệ 27 kết quả thực tế nằm trong top 10 của model. Lift được so với baseline 10%.</p>
+          <p>Coverage đo tỷ lệ {latestDraw.numbers.length} kết quả thực tế nằm trong top 10 của model. Lift được so với baseline 10%.</p>
         </div>
 
         <div className="control-bar">
           <div className="region-switch" aria-label="Chọn miền">
-            <button className="active" type="button">XSMB <span>Sẵn sàng</span></button>
-            <button disabled type="button" title="Cần tải Gold XSMN về frontend">XSMN <span>Chờ Gold</span></button>
-            <button disabled type="button" title="Cần tải Gold XSMT về frontend">XSMT <span>Chờ Gold</span></button>
+            {LOTTERY_REGIONS.map((option) => (
+              <button
+                className={region === option ? "active" : ""}
+                key={option}
+                type="button"
+                onClick={() => chooseRegion(option)}
+                aria-pressed={region === option}
+              >
+                {option.toUpperCase()} <span>{region === option ? "Đang xem" : "Sẵn sàng"}</span>
+              </button>
+            ))}
           </div>
+          {data.stations.length > 1 && (
+            <label>
+              Đài phân tích
+              <select value={selectedStation} onChange={(event) => setSelectedStation(event.target.value)}>
+                {data.stations.map((station) => (
+                  <option key={station.code} value={station.code}>{station.name}</option>
+                ))}
+              </select>
+            </label>
+          )}
           <label>
             Cửa sổ phân tích
             <select value={selectedWindow} onChange={(event) => setSelectedWindow(Number(event.target.value))}>
@@ -380,13 +426,13 @@ export default function Home() {
       <section className="data-health" id="health">
         <div className="section-heading">
           <div><p className="kicker">DATA HEALTH</p><h2>Biết dashboard đang đọc gì</h2></div>
-          <p>Bản demo không kết nối R2 và không dùng credential. Dữ liệu được export trực tiếp từ file lịch sử đang có trong repo.</p>
+          <p>Dashboard chỉ đọc JSON gọn qua API Worker. Gold Parquet và credential không bao giờ được gửi xuống trình duyệt.</p>
         </div>
         <div className="health-grid">
-          <article><span className="health-dot good" /><div><small>Nguồn hiện tại</small><strong>{data.source}</strong></div><em>LOCAL</em></article>
-          <article><span className="health-dot good" /><div><small>Ngày mới nhất</small><strong>{formatDate(data.latest.date)}</strong></div><em>FRESH</em></article>
-          <article><span className="health-dot pending" /><div><small>Gold XSMN</small><strong>Chưa tải vào frontend</strong></div><em>PENDING</em></article>
-          <article><span className="health-dot pending" /><div><small>Gold XSMT</small><strong>ETL đã hỗ trợ, frontend chưa tải</strong></div><em>PENDING</em></article>
+          <article><span className="health-dot good" /><div><small>Dataset version</small><strong>{data.manifest.datasetVersion}</strong></div><em>{dataSource === "r2" ? "R2" : "DEMO"}</em></article>
+          <article><span className={`health-dot ${data.freshness.matchesManifestTarget ? "good" : "pending"}`} /><div><small>Ngày mới nhất</small><strong>{formatDate(latestDraw.date)}</strong></div><em>{data.freshness.matchesManifestTarget ? "SYNCED" : "LAG"}</em></article>
+          <article><span className="health-dot good" /><div><small>Miền dữ liệu</small><strong>{regionName(region)}</strong></div><em>{region.toUpperCase()}</em></article>
+          <article><span className="health-dot good" /><div><small>Đài đang phân tích</small><strong>{analysis.station.name}</strong></div><em>{analysis.station.code.toUpperCase()}</em></article>
         </div>
       </section>
 

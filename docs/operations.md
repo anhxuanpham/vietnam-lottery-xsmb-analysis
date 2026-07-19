@@ -56,12 +56,48 @@ The command cannot change XSMB because it opens only the XSMN repository/bucket.
 
 ## Recovery checks
 
+- Start with the lightweight publication check. It reads only `manifests/latest.json`, its exact run/snapshot
+  manifests, and HEAD metadata for the referenced Gold objects. It does not list or download Silver partitions,
+  download Gold payloads, or rebuild Gold:
+
+```bash
+uv run lottery-etl status --storage r2 --region all
+uv run lottery-etl status --storage r2 --region all --json
+```
+
+The command exits `0` only when every requested lake has a successful, quality-passed run manifest, a matching
+snapshot manifest, and matching size/SHA-256/content metadata for every published Gold object. It exits `1` for an
+unpublished lake, missing manifest/object, or metadata mismatch, so the JSON form is suitable for a GitHub Actions
+health gate. `--storage local --output data/lake` checks local lakes; with `--region all`, the command resolves
+`data/lake/xsmb`, `data/lake/xsmn`, and `data/lake/xsmt` independently.
+
 - Confirm the selected R2 bucket name before running a destructive `--force` operation.
 - Inspect that region's most recent run manifest and quality report.
 - Confirm `manifests/latest.json` still points to the last complete run after a failure.
 - Compare object SHA-256 metadata to manifest values.
 - Re-run only unresolved dates; do not infer completeness from the maximum stored date.
 - Rotate the relevant bucket token immediately if credentials may have been exposed.
+
+## Dashboard publication
+
+`Publish Lottery Dashboard Data` runs automatically after a successful Daily ETL workflow and can also be
+dispatched manually. It first runs the metadata-only three-lake health gate, downloads only the published
+`fact-draw-result.parquet` plus `dim-station.parquet` where applicable, exports 455 recent draws per station, and
+uploads compact JSON to the Sites Worker. The three source lakes stay private; the browser only reads the separate
+`LOTTERY_DATA` serving bucket.
+
+GitHub Actions configuration (one entry per line):
+
+```text
+DASHBOARD_INGEST_URL (variable) = https://<site>/api/admin/lottery
+DASHBOARD_INGEST_TOKEN (secret) = same value as the Sites runtime secret
+DASHBOARD_SITES_BYPASS_TOKEN (secret) = Sites owner-only bypass token
+```
+
+If the URL or ingest token is absent, the automatic workflow records a skipped publication instead of touching the
+serving bucket. A configured publish must return success for all three regions; otherwise the workflow fails. The
+Worker validates the region, schema, content type, token, and 8 MiB body limit before replacing
+`regions/<region>.json`.
 
 ## Local verification
 

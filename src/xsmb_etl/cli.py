@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from xsmb_etl.config import EtlEnvironment, Settings
 from xsmb_etl.control import DrawStatus
 from xsmb_etl.extract import ExtractedResult, ResultExtractor, parse_result_page
+from xsmb_etl.lake_status import LakeStatus, inspect_lake
 from xsmb_etl.logging_config import configure_logging
 from xsmb_etl.marts import build_gold_tables
 from xsmb_etl.migration import HistoricalMigrator
@@ -85,6 +86,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             print(_json_object(reports))
         return 0
+    if args.command == 'status':
+        regions = _regions(args.region)
+        statuses = []
+        for region in regions:
+            repository = _repository_for_args(settings, args, region, multiple=len(regions) > 1)
+            statuses.append(inspect_lake(repository))
+        if args.json:
+            _print_status_json(statuses)
+        else:
+            _print_status_text(statuses)
+        return 0 if all(status.healthy for status in statuses) else 1
     if args.command == 'download-gold':
         regions = _regions(args.region)
         paths = []
@@ -142,6 +154,13 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_storage_options(validate)
     validate.add_argument('--fixture', type=Path)
     validate.add_argument('--target-date', type=_date)
+
+    status = subparsers.add_parser(
+        'status',
+        help='check manifests and object metadata without scanning Silver or Gold data',
+    )
+    _add_storage_options(status)
+    status.add_argument('--json', action='store_true', help='emit machine-readable JSON')
 
     download = subparsers.add_parser('download-gold', help='download current Gold objects')
     _add_storage_options(download)
@@ -389,3 +408,30 @@ def _print_models(models, *, collapse_single: bool) -> None:
         print(models[0].model_dump_json(indent=2))
         return
     print(_json_list(model.model_dump(mode='json') for model in models))
+
+
+def _print_status_json(statuses: list[LakeStatus]) -> None:
+    if len(statuses) == 1:
+        print(statuses[0].model_dump_json(indent=2))
+        return
+    print(_json_object({status.region.value: status.model_dump(mode='json') for status in statuses}))
+
+
+def _print_status_text(statuses: list[LakeStatus]) -> None:
+    for index, status in enumerate(statuses):
+        if index:
+            print()
+        state = 'OK' if status.healthy else 'UNHEALTHY'
+        print(f'{status.region.value.upper()}  {state}')
+        if status.run_id:
+            print(f'  publication: {status.target_date} (run {status.run_id})')
+            quality = 'passed' if status.quality_passed else 'failed'
+            print(f'  control: {status.run_status or "missing"}; quality={quality}')
+            print(
+                f'  objects: {status.verified_object_count}/{status.object_count} metadata checks passed; '
+                f'{status.total_size_bytes} bytes'
+            )
+            snapshot = 'matches latest' if status.snapshot_matches_latest else 'does not match latest'
+            print(f'  snapshot: {snapshot}')
+        for issue in status.issues:
+            print(f'  issue: {issue}')

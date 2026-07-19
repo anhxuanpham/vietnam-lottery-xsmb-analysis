@@ -8,18 +8,22 @@
   "scripts": {
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
+    "types:worker": "wrangler types worker-configuration.d.ts --config dist/server/wrangler.json --env-interface Env --include-runtime false",
+    "types:check": "wrangler types worker-configuration.d.ts --config dist/server/wrangler.json --env-interface Env --include-runtime false --check",
+    "typecheck": "tsc --noEmit",
     "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
-    "data:refresh": "cd .. && uv run python scripts/export_frontend_demo.py",
-    "test": "npm run build && node --test tests/rendered-html.test.mjs",
+    "data:refresh": "cd .. && uv run python scripts/export_serving_data.py --storage r2 --region xsmb --output frontend/public/data/xsmb-demo.json && uv run python scripts/export_serving_data.py --storage r2 --region xsmn --output frontend/public/data/xsmn-demo.json && uv run python scripts/export_serving_data.py --storage r2 --region xsmt --output frontend/public/data/xsmt-demo.json",
+    "test": "npm run build && npm run types:check && node --test tests/rendered-html.test.mjs",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
   },
   "dependencies": {
-    "next": "16.2.6",
+    "next": "16.2.10",
     "react": "19.2.6",
     "react-dom": "19.2.6"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
+    "@cloudflare/vite-plugin": "1.45.1",
+    "@cloudflare/workers-types": "5.20260719.1",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",
@@ -32,8 +36,11 @@
     "tailwindcss": "4.2.1",
     "typescript": "5.9.3",
     "vinext": "0.0.50",
-    "vite": "8.0.13",
-    "wrangler": "4.92.0"
+    "vite": "8.1.5",
+    "wrangler": "4.112.0"
+  },
+  "overrides": {
+    "postcss": "8.5.20"
   },
   "type": "module"
 }

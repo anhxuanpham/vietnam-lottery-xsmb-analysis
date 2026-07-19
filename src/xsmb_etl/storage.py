@@ -103,16 +103,22 @@ class LocalObjectStore:
         return self._path_for(key).is_file()
 
     def head(self, key: str) -> StoredObject:
-        if not self.exists(key):
+        path = self._path_for(key)
+        if not path.is_file():
             raise ObjectNotFoundError(f'object does not exist: {key}')
         metadata_path = self._metadata_path_for(key)
         if metadata_path.is_file():
-            values = json.loads(metadata_path.read_text(encoding='utf-8'))
+            try:
+                values = json.loads(metadata_path.read_text(encoding='utf-8'))
+                sha256 = str(values['sha256'])
+                content_type = str(values['content_type'])
+            except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+                raise ObjectStoreError(f'invalid object metadata: {key}') from exc
             return StoredObject(
                 key=key,
-                size=int(values['size']),
-                sha256=str(values['sha256']),
-                content_type=str(values['content_type']),
+                size=path.stat().st_size,
+                sha256=sha256,
+                content_type=content_type,
                 cache_control=values.get('cache_control'),
             )
         data = self.get_bytes(key)

@@ -28,6 +28,8 @@ uv run lottery-etl backfill --region xsmb --from 2026-07-14 --to 2026-07-16
 
 For the complete six-digit XSMN history, dispatch `xsmn-backfill.yml` with `from_year=2010`. It runs one year at a time with `max-parallel: 1` and shares the `vietnam-lottery-xsmn` concurrency group with the daily XSMN job.
 
+Historical backfill never requests the current Vietnam date. A current-year batch ends at yesterday, while `daily-etl.yml` owns today's result after the scheduled draw publication window. On January 1, the current-year historical batch exits successfully with no dates instead of requesting an incomplete draw.
+
 If the source officially confirms there was no draw, record it explicitly in the affected lake:
 
 ```bash

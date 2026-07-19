@@ -100,13 +100,12 @@ jobs:
         env:
           BATCH_YEAR: ${{ matrix.year }}
         run: |
-          current_date="$(TZ=Asia/Ho_Chi_Minh date +%F)"
-          current_year="${current_date%%-*}"
           from_date="${BATCH_YEAR}-01-01"
-          if [[ "$BATCH_YEAR" == "$current_year" ]]; then
-            to_date="$current_date"
-          else
-            to_date="${BATCH_YEAR}-12-31"
+          to_date="$(uv run python -m xsmb_etl.backfill_window --year "$BATCH_YEAR")"
+          if [[ -z "$to_date" ]]; then
+            echo "No completed XSMN dates exist yet for $BATCH_YEAR."
+            echo '[]' | tee xsmn-backfill-result.json
+            exit 0
           fi
 
           command=(

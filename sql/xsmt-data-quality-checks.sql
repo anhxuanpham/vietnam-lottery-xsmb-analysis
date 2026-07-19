@@ -22,8 +22,29 @@ FROM read_parquet('gold/latest/fact-draw-result.parquet')
 GROUP BY draw_date, station_code, prize_group, prize_order
 HAVING COUNT(*) > 1;
 
--- Must return no rows: source dates that contain neither two nor three stations.
-SELECT draw_date, COUNT(DISTINCT station_code) AS station_count
-FROM read_parquet('gold/latest/fact-draw-result.parquet')
-GROUP BY draw_date
-HAVING COUNT(DISTINCT station_code) NOT IN (2, 3);
+-- Must return no rows: source dates outside the normal two/three-station rule
+-- or the exact documented partial-draw station set during the 2021 closures.
+WITH documented_partial_draws(draw_date, station_code) AS (
+    VALUES
+        (DATE '2021-07-27', 'QNA'),
+        (DATE '2021-08-03', 'QNA'),
+        (DATE '2021-08-06', 'GL'),
+        (DATE '2021-08-18', 'KH')
+),
+actual AS (
+    SELECT
+        draw_date,
+        COUNT(DISTINCT station_code) AS station_count,
+        MIN(station_code) AS single_station_code
+    FROM read_parquet('gold/latest/fact-draw-result.parquet')
+    GROUP BY draw_date
+)
+SELECT actual.draw_date, actual.station_count, actual.single_station_code
+FROM actual
+LEFT JOIN documented_partial_draws USING (draw_date)
+WHERE
+    (documented_partial_draws.draw_date IS NULL AND actual.station_count NOT IN (2, 3))
+    OR (
+        documented_partial_draws.draw_date IS NOT NULL
+        AND (actual.station_count <> 1 OR actual.single_station_code <> documented_partial_draws.station_code)
+    );

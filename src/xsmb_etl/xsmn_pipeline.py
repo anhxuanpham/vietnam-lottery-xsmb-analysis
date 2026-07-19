@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -31,6 +32,8 @@ from xsmb_etl.xsmn_transform import (
 
 
 class SouthernPipeline:
+    documented_partial_draws: Mapping[date, frozenset[str]] = {}
+
     def __init__(
         self,
         repository: SouthernDataLakeRepository,
@@ -93,6 +96,7 @@ class SouthernPipeline:
                 gold_tables=current_gold,
                 today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
                 region=self.region,
+                documented_partial_draws=self.documented_partial_draws,
             )
             require_quality(pre_write_report)
 
@@ -115,6 +119,7 @@ class SouthernPipeline:
                 statuses=statuses,
                 today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
                 region=self.region,
+                documented_partial_draws=self.documented_partial_draws,
             )
             require_quality(report)
             quality_passed = True
@@ -254,6 +259,7 @@ class SouthernPipeline:
                 gold_tables=current_gold,
                 today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
                 region=self.region,
+                documented_partial_draws=self.documented_partial_draws,
             )
             require_quality(report)
             quality_passed = True
@@ -358,6 +364,7 @@ class SouthernPipeline:
                 statuses=statuses,
                 today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
                 region=self.region,
+                documented_partial_draws=self.documented_partial_draws,
             )
             require_quality(report)
             objects.extend(self.repository.replace_silver_loto_daily(all_loto))

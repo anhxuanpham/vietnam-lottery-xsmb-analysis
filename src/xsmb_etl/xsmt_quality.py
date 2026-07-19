@@ -13,6 +13,14 @@ from xsmb_etl.xsmn_quality import build_southern_quality_report
 from xsmb_etl.xsmt_models import CentralDailyResult
 
 
+XSMT_DOCUMENTED_PARTIAL_DRAWS: dict[date, frozenset[str]] = {
+    date(2021, 7, 27): frozenset({'QNA'}),
+    date(2021, 8, 3): frozenset({'QNA'}),
+    date(2021, 8, 6): frozenset({'GL'}),
+    date(2021, 8, 18): frozenset({'KH'}),
+}
+
+
 def build_central_quality_report(
     results: list[CentralDailyResult],
     draw_results: pd.DataFrame,
@@ -32,6 +40,7 @@ def build_central_quality_report(
         statuses=statuses,
         today=today,
         region=LotteryRegion.XSMT,
+        documented_partial_draws=XSMT_DOCUMENTED_PARTIAL_DRAWS,
     )
 
 

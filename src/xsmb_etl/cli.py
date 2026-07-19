@@ -32,6 +32,7 @@ from xsmb_etl.xsmn_transform import (
 )
 from xsmb_etl.xsmt_extract import CentralResultExtractor, parse_central_result_page
 from xsmb_etl.xsmt_pipeline import CentralPipeline
+from xsmb_etl.xsmt_quality import build_central_quality_report
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -307,7 +308,10 @@ def _validate(
         loto = southern_loto_daily_frame(draw, run_id=run_id)
         statuses = {result.draw_date: DrawStatus.SUCCESS for result in canonical}
         gold = build_southern_gold_tables(draw, run_id=run_id, statuses=statuses)
-        return build_southern_quality_report(
+        quality_builder = (
+            build_central_quality_report if region is LotteryRegion.XSMT else build_southern_quality_report
+        )
+        return quality_builder(
             canonical,
             draw,
             loto,
@@ -315,7 +319,7 @@ def _validate(
             gold_tables=gold,
             statuses=statuses,
             today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
-            region=region,
+            **({'region': region} if region is LotteryRegion.XSMN else {}),
         )
 
     if args.fixture:

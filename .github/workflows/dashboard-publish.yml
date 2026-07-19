@@ -2,11 +2,8 @@ name: Publish Lottery Dashboard Data
 
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows:
-      - Daily Vietnam Lottery ETL
-    types:
-      - completed
+  schedule:
+    - cron: "0 13 * * *"
 
 permissions:
   contents: read
@@ -17,10 +14,6 @@ concurrency:
 
 jobs:
   publish:
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-      github.event.workflow_run.head_branch == github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -74,7 +67,13 @@ jobs:
 
       - name: Verify published Gold metadata
         if: steps.config.outputs.ready == 'true'
-        run: uv run lottery-etl status --storage r2 --region all --json | tee lake-status.json
+        shell: bash
+        run: |
+          uv run lottery-etl status --storage r2 --region all --json | tee lake-status.json
+          expected_date="$(TZ=Asia/Ho_Chi_Minh date +%F)"
+          jq --exit-status --arg expected_date "$expected_date" \
+            'all(.[]; .target_date == $expected_date)' \
+            lake-status.json >/dev/null
 
       - name: Export and publish compact payloads
         if: steps.config.outputs.ready == 'true'

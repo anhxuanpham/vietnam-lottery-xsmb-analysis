@@ -49,3 +49,11 @@ jobs:
           --target-date 2026-07-16
           --fixture tests/fixtures/valid-xsmn-result-page.html
           --output /tmp/xsmn-etl-ci
+
+      - name: Run local XSMT fixture pipeline
+        run: >-
+          uv run lottery-etl run
+          --region xsmt
+          --target-date 2026-07-18
+          --fixture tests/fixtures/valid-xsmt-result-page.html
+          --output /tmp/xsmt-etl-ci

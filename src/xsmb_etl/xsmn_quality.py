@@ -9,6 +9,7 @@ import pandas as pd
 
 from xsmb_etl.control import DrawStatus
 from xsmb_etl.quality import QualityCheck, QualityReport, QualitySeverity
+from xsmb_etl.run_models import LotteryRegion
 from xsmb_etl.xsmn_models import SOUTHERN_EXPECTED_RESULT_COUNT, SOUTHERN_PRIZE_SPECS, SouthernDailyResult
 
 
@@ -21,16 +22,20 @@ def build_southern_quality_report(
     gold_tables: dict[str, pd.DataFrame] | None = None,
     statuses: dict[date, DrawStatus] | None = None,
     today: date | None = None,
+    region: LotteryRegion = LotteryRegion.XSMN,
 ) -> QualityReport:
     today = today or datetime.now(UTC).date()
     target_dates = tuple(sorted({result.draw_date for result in results}))
     station_results = [station for result in results for station in result.stations]
+    expected_station_counts = {2, 3} if region is LotteryRegion.XSMT else {3, 4}
+    region_label = region.value.upper()
     checks: list[QualityCheck] = [
         _check('requested-date-validated', bool(results), 'source pages passed selected-date validation'),
         _check(
             'station-count-per-day',
-            bool(results) and all(len(result.stations) in {3, 4} for result in results),
-            'each XSMN date contains three or four stations',
+            bool(results) and all(len(result.stations) in expected_station_counts for result in results),
+            f'each {region_label} date contains '
+            f'{min(expected_station_counts)} or {max(expected_station_counts)} stations',
         ),
         _check(
             'station-code-unique-per-day',

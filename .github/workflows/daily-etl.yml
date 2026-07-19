@@ -17,6 +17,7 @@ on:
           - all
           - xsmb
           - xsmn
+          - xsmt
         default: all
   schedule:
     - cron: "35 11 * * *"
@@ -38,6 +39,7 @@ jobs:
         region:
           - xsmb
           - xsmn
+          - xsmt
     env:
       ETL_ENV: production
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -49,10 +51,17 @@ jobs:
       R2_XSMN_ACCESS_KEY_ID: ${{ secrets.R2_XSMN_ACCESS_KEY_ID }}
       R2_XSMN_SECRET_ACCESS_KEY: ${{ secrets.R2_XSMN_SECRET_ACCESS_KEY }}
       R2_XSMN_ENDPOINT_URL: ${{ secrets.R2_XSMN_ENDPOINT_URL }}
+      R2_XSMT_BUCKET_NAME: ${{ secrets.R2_XSMT_BUCKET_NAME }}
+      R2_XSMT_ACCOUNT_ID: ${{ secrets.R2_XSMT_ACCOUNT_ID }}
+      R2_XSMT_ACCESS_KEY_ID: ${{ secrets.R2_XSMT_ACCESS_KEY_ID }}
+      R2_XSMT_SECRET_ACCESS_KEY: ${{ secrets.R2_XSMT_SECRET_ACCESS_KEY }}
+      R2_XSMT_ENDPOINT_URL: ${{ secrets.R2_XSMT_ENDPOINT_URL }}
       R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
       R2_XSMN_PUBLIC_BASE_URL: ${{ vars.R2_XSMN_PUBLIC_BASE_URL }}
+      R2_XSMT_PUBLIC_BASE_URL: ${{ vars.R2_XSMT_PUBLIC_BASE_URL }}
       SOURCE_BASE_URL: ${{ vars.SOURCE_BASE_URL }}
       XSMN_FALLBACK_BASE_URL: ${{ vars.XSMN_FALLBACK_BASE_URL }}
+      XSMT_FALLBACK_BASE_URL: ${{ vars.XSMT_FALLBACK_BASE_URL }}
       TARGET_DATE: ${{ inputs.target_date }}
       FORCE: ${{ inputs.force }}
       REQUESTED_REGION: ${{ inputs.region }}
@@ -62,6 +71,15 @@ jobs:
         shell: bash
         run: |
           requested="${REQUESTED_REGION:-all}"
+          if [[ "${{ matrix.region }}" == "xsmt" && -z "$R2_XSMT_BUCKET_NAME" ]]; then
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+            if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && ( "$requested" == "all" || "$requested" == "xsmt" ) ]]; then
+              echo "R2_XSMT_BUCKET_NAME is required before manually running XSMT." >&2
+              exit 1
+            fi
+            echo "Skipping scheduled XSMT until R2_XSMT_BUCKET_NAME is configured."
+            exit 0
+          fi
           if [[ "$requested" == "all" || "$requested" == "${{ matrix.region }}" ]]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else

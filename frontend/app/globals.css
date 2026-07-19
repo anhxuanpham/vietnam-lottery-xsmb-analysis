@@ -131,7 +131,7 @@ a { color: inherit; text-decoration: none; }
 .momentum-row span { text-align: right; font: 600 9px var(--font-geist-mono); color: var(--muted); }
 
 .data-health { background: var(--paper-deep); border-top: 1px solid var(--line); }
-.health-grid { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); background: var(--paper); }
+.health-grid { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--line); background: var(--paper); }
 .health-grid article { min-height: 110px; padding: 24px; display: grid; grid-template-columns: auto 1fr auto; gap: 13px; align-items: center; border-right: 1px solid var(--line); }
 .health-grid article:last-child { border-right: 0; }
 .health-dot { width: 9px; height: 9px; border-radius: 50%; }.health-dot.good { background: #319d5a; }.health-dot.pending { background: #d7942c; }

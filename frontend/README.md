@@ -1,6 +1,6 @@
 # Lôtô Lab dashboard
 
-Frontend demo cho data lake XSMB/XSMN. Bản hiện tại chạy hoàn toàn local, không đọc `.env`, không kết nối R2 và không cần credential.
+Frontend demo cho data lake XSMB/XSMN/XSMT. Bản hiện tại chạy hoàn toàn local, không đọc `.env`, không kết nối R2 và không cần credential.
 
 ## Chạy local
 
@@ -21,7 +21,7 @@ Mở URL do terminal in ra, thường là `http://localhost:3000` hoặc cổng 
 - Model tần suất, khoảng vắng và model cân bằng 60/40.
 - Backtest 90 kỳ với coverage top 10 và baseline 10%.
 - Tín hiệu nóng/lạnh và đà 7 kỳ so với 30 kỳ.
-- Trạng thái nguồn dữ liệu; XSMN được đánh dấu chờ Gold thay vì dùng dữ liệu giả.
+- Trạng thái nguồn dữ liệu; XSMN và XSMT được đánh dấu chờ Gold thay vì dùng dữ liệu giả.
 
 Các model chỉ là heuristic mô tả, không phải dự báo xác suất trúng hoặc khuyến nghị đặt cược.
 

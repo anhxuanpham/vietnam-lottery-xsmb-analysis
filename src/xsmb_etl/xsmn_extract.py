@@ -21,7 +21,7 @@ from xsmb_etl.extract import (
 from xsmb_etl.xsmn_models import SouthernDailyResult, SouthernPrizeGroup, SouthernStationResult
 
 
-XSMN_SECTION_ID_PATTERN = re.compile(r'^mn_kqngay_(\d{8})$')
+XSMN_SECTION_ID_PATTERN = re.compile(r'^mn_kqngay_(\d{8})(?:_kq)?$')
 XSMN_CANONICAL_DATE_PATTERN = re.compile(r'/xsmn-(\d{2})-(\d{2})-(\d{4})\.html')
 STATION_CODE_PATTERN = re.compile(r'/xs(?P<code>[a-z0-9]+)-p\d+\.html$', re.IGNORECASE)
 FALLBACK_STATION_CODE_PATTERN = re.compile(r'^/xs(?P<code>[a-z0-9]+)(?:-[a-z0-9]+)*$', re.IGNORECASE)
@@ -64,6 +64,22 @@ class SourceReconciliationError(SourcePageError):
 
 
 @dataclass(frozen=True)
+class RegionalSourceProfile:
+    region_label: str
+    source_slug: str
+    section_id_pattern: re.Pattern[str]
+    canonical_date_pattern: re.Pattern[str]
+
+
+XSMN_SOURCE_PROFILE = RegionalSourceProfile(
+    region_label='XSMN',
+    source_slug='xsmn',
+    section_id_pattern=XSMN_SECTION_ID_PATTERN,
+    canonical_date_pattern=XSMN_CANONICAL_DATE_PATTERN,
+)
+
+
+@dataclass(frozen=True)
 class _StationPageValues:
     station_code: str
     station_name: str
@@ -84,6 +100,8 @@ class SouthernExtractedResult:
 
 
 class SouthernResultExtractor(ResultExtractor):
+    source_profile = XSMN_SOURCE_PROFILE
+
     def extract(self, selected_date: date) -> SouthernExtractedResult:
         url = self.build_source_url(selected_date)
         response = self._get_with_retry(url)
@@ -91,7 +109,12 @@ class SouthernResultExtractor(ResultExtractor):
         if not raw_response:
             raise SourcePageError(f'source returned an empty response for {url}')
         try:
-            result = parse_southern_result_page(raw_response, selected_date=selected_date, source_url=url)
+            result = parse_southern_result_page(
+                raw_response,
+                selected_date=selected_date,
+                source_url=url,
+                profile=self.source_profile,
+            )
             return SouthernExtractedResult(raw_response=raw_response, result=result)
         except RecoverableHistoricalResultError:
             fallback_url = self.build_fallback_source_url(selected_date)
@@ -103,12 +126,14 @@ class SouthernResultExtractor(ResultExtractor):
                 fallback_response,
                 selected_date=selected_date,
                 source_url=fallback_url,
+                profile=self.source_profile,
             )
             result = reconcile_historical_southern_page(
                 raw_response,
                 fallback_result=fallback_result,
                 selected_date=selected_date,
                 source_url=url,
+                profile=self.source_profile,
             )
             return SouthernExtractedResult(
                 raw_response=raw_response,
@@ -119,7 +144,7 @@ class SouthernResultExtractor(ResultExtractor):
 
     def build_source_url(self, selected_date: date) -> str:
         base_url = str(self.settings.source_base_url).rstrip('/')
-        return f'{base_url}/xsmn-{selected_date:%d-%m-%Y}.html'
+        return f'{base_url}/{self.source_profile.source_slug}-{selected_date:%d-%m-%Y}.html'
 
     def build_fallback_source_url(self, selected_date: date) -> str:
         base_url = str(self.settings.xsmn_fallback_base_url).rstrip('/')
@@ -131,13 +156,20 @@ def parse_southern_result_page(
     *,
     selected_date: date,
     source_url: str,
+    profile: RegionalSourceProfile = XSMN_SOURCE_PROFILE,
 ) -> SouthernDailyResult:
     stations = _primary_station_values(
         raw_response,
         selected_date=selected_date,
         source_url=source_url,
+        profile=profile,
     )
-    return _build_southern_result(stations, selected_date=selected_date, source_url=source_url)
+    return _build_southern_result(
+        stations,
+        selected_date=selected_date,
+        source_url=source_url,
+        profile=profile,
+    )
 
 
 def _primary_station_values(
@@ -145,11 +177,14 @@ def _primary_station_values(
     *,
     selected_date: date,
     source_url: str,
+    profile: RegionalSourceProfile = XSMN_SOURCE_PROFILE,
 ) -> tuple[_StationPageValues, ...]:
     soup = BeautifulSoup(raw_response, 'lxml')
-    represented_date, result_container = _represented_date_and_container(soup)
+    represented_date, result_container = _represented_date_and_container(soup, profile)
     if represented_date is None:
-        raise SourcePageError('could not determine the XSMN draw date represented by the source page')
+        raise SourcePageError(
+            f'could not determine the {profile.region_label} draw date represented by the source page'
+        )
     if represented_date != selected_date:
         raise RequestedDateMismatchError(
             f'requested {selected_date.isoformat()} but page represents {represented_date.isoformat()}'
@@ -162,11 +197,11 @@ def _primary_station_values(
     container = result_container or soup
     table = container.select_one('table.table-result.table-xsmn')
     if not isinstance(table, Tag):
-        raise SourcePageError('could not find the XSMN result table')
+        raise SourcePageError(f'could not find the {profile.region_label} result table')
 
     station_links = table.select('thead h3 a[href]')
     if not station_links:
-        raise SourcePageError('XSMN result table does not contain station headers')
+        raise SourcePageError(f'{profile.region_label} result table does not contain station headers')
 
     stations: list[_StationPageValues] = []
     for station_index, station_link in enumerate(station_links):
@@ -211,6 +246,7 @@ def _build_southern_result(
     *,
     selected_date: date,
     source_url: str,
+    profile: RegionalSourceProfile = XSMN_SOURCE_PROFILE,
 ) -> SouthernDailyResult:
     stations = []
     for station in station_values:
@@ -237,7 +273,7 @@ def _build_southern_result(
     try:
         return SouthernDailyResult(draw_date=selected_date, source_url=source_url, stations=tuple(stations))
     except ValueError as exc:
-        raise SourcePageError(f'invalid XSMN daily result: {exc}') from exc
+        raise SourcePageError(f'invalid {profile.region_label} daily result: {exc}') from exc
 
 
 def parse_southern_fallback_page(
@@ -245,13 +281,14 @@ def parse_southern_fallback_page(
     *,
     selected_date: date,
     source_url: str,
+    profile: RegionalSourceProfile = XSMN_SOURCE_PROFILE,
 ) -> SouthernDailyResult:
     """Parse the independent historical source used only for reconciliation."""
 
     soup = BeautifulSoup(raw_response, 'lxml')
     represented_date = _fallback_represented_date(soup)
     if represented_date is None:
-        raise SourcePageError('could not determine the fallback XSMN draw date')
+        raise SourcePageError(f'could not determine the fallback {profile.region_label} draw date')
     if represented_date != selected_date:
         raise RequestedDateMismatchError(
             f'requested {selected_date.isoformat()} but fallback page represents {represented_date.isoformat()}'
@@ -259,14 +296,14 @@ def parse_southern_fallback_page(
 
     table = soup.select_one('table.tbl-xsmn')
     if not isinstance(table, Tag):
-        raise SourcePageError('could not find the fallback XSMN result table')
+        raise SourcePageError(f'could not find the fallback {profile.region_label} result table')
     header_row = table.find('tr')
     if not isinstance(header_row, Tag):
         raise SourcePageError('fallback XSMN result table has no header row')
     header_cells = header_row.find_all('th', recursive=False)
     station_links = [cell.find('a', href=FALLBACK_STATION_CODE_PATTERN) for cell in header_cells[1:]]
     if not station_links or any(not isinstance(link, Tag) for link in station_links):
-        raise SourcePageError('fallback XSMN result table does not contain station headers')
+        raise SourcePageError(f'fallback {profile.region_label} result table does not contain station headers')
 
     station_groups: list[dict[str, list[str]]] = [{} for _ in station_links]
     for row in table.find_all('tr', recursive=False)[1:]:
@@ -302,7 +339,12 @@ def parse_southern_fallback_page(
                 groups=groups,
             )
         )
-    return _build_southern_result(tuple(stations), selected_date=selected_date, source_url=source_url)
+    return _build_southern_result(
+        tuple(stations),
+        selected_date=selected_date,
+        source_url=source_url,
+        profile=profile,
+    )
 
 
 def reconcile_historical_southern_page(
@@ -311,6 +353,7 @@ def reconcile_historical_southern_page(
     fallback_result: SouthernDailyResult,
     selected_date: date,
     source_url: str,
+    profile: RegionalSourceProfile = XSMN_SOURCE_PROFILE,
 ) -> SouthernDailyResult:
     """Repair only proven historical corruption after full cross-source comparison."""
 
@@ -318,8 +361,9 @@ def reconcile_historical_southern_page(
         raw_response,
         selected_date=selected_date,
         source_url=source_url,
+        profile=profile,
     )
-    fallback_by_primary_code = _match_fallback_stations(primary_stations, fallback_result)
+    fallback_by_primary_code = _match_fallback_stations(primary_stations, fallback_result, profile=profile)
     daywide_special_repair = _daywide_special_truncation_is_consistent(
         primary_stations,
         fallback_by_primary_code,
@@ -351,7 +395,7 @@ def reconcile_historical_southern_page(
                 groups[group.value] = fallback_values
                 continue
             raise SourceReconciliationError(
-                f'primary and fallback XSMN values differ for {primary.station_code} {group.value}'
+                f'primary and fallback {profile.region_label} values differ for {primary.station_code} {group.value}'
             )
 
         reconciled.append(
@@ -363,12 +407,19 @@ def reconcile_historical_southern_page(
             )
         )
 
-    return _build_southern_result(tuple(reconciled), selected_date=selected_date, source_url=source_url)
+    return _build_southern_result(
+        tuple(reconciled),
+        selected_date=selected_date,
+        source_url=source_url,
+        profile=profile,
+    )
 
 
 def _match_fallback_stations(
     primary_stations: tuple[_StationPageValues, ...],
     fallback_result: SouthernDailyResult,
+    *,
+    profile: RegionalSourceProfile = XSMN_SOURCE_PROFILE,
 ) -> dict[str, SouthernStationResult]:
     remaining = list(fallback_result.stations)
     matches: dict[str, SouthernStationResult] = {}
@@ -380,12 +431,12 @@ def _match_fallback_stations(
                 station for station in remaining if _normalized_station_name(station.station_name) == primary_name
             ]
         if len(candidates) != 1:
-            raise SourceReconciliationError('primary and fallback XSMN station sets differ')
+            raise SourceReconciliationError(f'primary and fallback {profile.region_label} station sets differ')
         match = candidates[0]
         remaining.remove(match)
         matches[primary.station_code] = match
     if remaining:
-        raise SourceReconciliationError('primary and fallback XSMN station sets differ')
+        raise SourceReconciliationError(f'primary and fallback {profile.region_label} station sets differ')
     return matches
 
 
@@ -491,12 +542,15 @@ def _fallback_represented_date(soup: BeautifulSoup) -> date | None:
     return None
 
 
-def _represented_date_and_container(soup: BeautifulSoup) -> tuple[date | None, Tag | None]:
-    section = soup.find('section', id=XSMN_SECTION_ID_PATTERN)
+def _represented_date_and_container(
+    soup: BeautifulSoup,
+    profile: RegionalSourceProfile = XSMN_SOURCE_PROFILE,
+) -> tuple[date | None, Tag | None]:
+    section = soup.find(['section', 'div'], id=profile.section_id_pattern)
     if isinstance(section, Tag):
         section_id = section.get('id')
         if isinstance(section_id, str):
-            match = XSMN_SECTION_ID_PATTERN.fullmatch(section_id)
+            match = profile.section_id_pattern.fullmatch(section_id)
             if match:
                 return datetime.strptime(match.group(1), '%d%m%Y').date(), section
 
@@ -504,7 +558,7 @@ def _represented_date_and_container(soup: BeautifulSoup) -> tuple[date | None, T
     if isinstance(canonical, Tag):
         href = canonical.get('href')
         if isinstance(href, str):
-            match = XSMN_CANONICAL_DATE_PATTERN.search(href)
+            match = profile.canonical_date_pattern.search(href)
             if match:
                 day, month, year = (int(value) for value in match.groups())
                 return date(year, month, day), None

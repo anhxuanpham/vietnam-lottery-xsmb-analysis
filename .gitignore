@@ -135,6 +135,7 @@ dmypy.json
 # Generated ETL and analytics outputs
 output/
 output-xsmn/
+output-xsmt/
 data/generated/
 images/generated/
 .wrangler/

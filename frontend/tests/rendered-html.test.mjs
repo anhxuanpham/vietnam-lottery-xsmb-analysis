@@ -34,6 +34,7 @@ test("ships the local demo data and removes the starter preview", async () => {
   assert.match(page, /MODEL LAB/);
   assert.match(page, /backtest/i);
   assert.match(page, /không phải dự báo xác suất trúng/i);
+  assert.match(page, /XSMT/);
   assert.match(layout, /lang="vi"/);
   assert.match(dataset, /"drawCount":7493/);
   await assert.rejects(access(new URL("app/_sites-preview", root)));

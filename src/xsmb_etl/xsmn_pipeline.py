@@ -1,4 +1,4 @@
-"""End-to-end orchestration for the independent XSMN data lake."""
+"""End-to-end orchestration for station-based XSMN and XSMT data lakes."""
 
 from __future__ import annotations
 
@@ -41,6 +41,10 @@ class SouthernPipeline:
         self.repository = repository
         self.extractor = extractor
         self.source_lineage = source_lineage
+        self.region = repository.region
+        if self.region not in {LotteryRegion.XSMN, LotteryRegion.XSMT}:
+            raise ValueError('SouthernPipeline requires an XSMN or XSMT repository')
+        self.region_label = self.region.value.upper()
 
     def run(self, target_date: date, *, force: bool = False) -> PipelineRunResult:
         control_state = self.repository.control_state()
@@ -48,11 +52,14 @@ class SouthernPipeline:
             status = control_state.status_for(target_date)
             return PipelineRunResult(
                 run_id=None,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=status.value,
                 skipped=True,
-                message=f'{target_date} is already classified as {status.value} in XSMN; use --force to replace it',
+                message=(
+                    f'{target_date} is already classified as {status.value} in {self.region_label}; '
+                    'use --force to replace it'
+                ),
             )
 
         run_id = str(uuid4())
@@ -85,6 +92,7 @@ class SouthernPipeline:
                 run_id=run_id,
                 gold_tables=current_gold,
                 today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
+                region=self.region,
             )
             require_quality(pre_write_report)
 
@@ -106,6 +114,7 @@ class SouthernPipeline:
                 gold_tables=gold_tables,
                 statuses=statuses,
                 today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
+                region=self.region,
             )
             require_quality(report)
             quality_passed = True
@@ -115,7 +124,7 @@ class SouthernPipeline:
 
             success_manifest = RunManifest(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.SUCCESS,
                 source_lineage=self.source_lineage,
@@ -135,16 +144,16 @@ class SouthernPipeline:
             objects.extend([snapshot, latest])
             return PipelineRunResult(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.SUCCESS.value,
                 object_count=len(objects),
-                message=f'published XSMN dataset version {run_id}',
+                message=f'published {self.region_label} dataset version {run_id}',
             )
         except NoDrawSourcePageError as exc:
             no_draw_manifest = RunManifest(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.NO_DRAW,
                 source_lineage=self.source_lineage,
@@ -157,7 +166,7 @@ class SouthernPipeline:
             objects.append(self.repository.write_run_manifest(no_draw_manifest))
             return PipelineRunResult(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.NO_DRAW.value,
                 object_count=len(objects),
@@ -166,7 +175,7 @@ class SouthernPipeline:
         except Exception as exc:
             failure_manifest = RunManifest(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.FAILED,
                 source_lineage=self.source_lineage,
@@ -204,7 +213,7 @@ class SouthernPipeline:
                 results[index] = result.model_copy(
                     update={
                         'message': (
-                            f'ingested XSMN Silver for {result.target_date}; '
+                            f'ingested {self.region_label} Silver for {result.target_date}; '
                             f'published batch dataset version {publication.run_id}'
                         )
                     }
@@ -212,7 +221,7 @@ class SouthernPipeline:
         return results
 
     def _ingest_backfill_date(self, target_date: date, *, force: bool) -> PipelineRunResult:
-        """Validate and persist one XSMN date without rebuilding all derived datasets."""
+        """Validate and persist one regional date without rebuilding derived datasets."""
 
         run_id = str(uuid4())
         started_at = datetime.now(UTC)
@@ -244,22 +253,25 @@ class SouthernPipeline:
                 run_id=run_id,
                 gold_tables=current_gold,
                 today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
+                region=self.region,
             )
             require_quality(report)
             quality_passed = True
             objects.extend(self.repository.upsert_silver_draw_results(current_draw))
             return PipelineRunResult(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.SUCCESS.value,
                 object_count=len(objects),
-                message=f'ingested validated XSMN Silver for {target_date}; awaiting batch publication',
+                message=(
+                    f'ingested validated {self.region_label} Silver for {target_date}; awaiting batch publication'
+                ),
             )
         except NoDrawSourcePageError as exc:
             manifest = RunManifest(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.NO_DRAW,
                 source_lineage=self.source_lineage,
@@ -272,7 +284,7 @@ class SouthernPipeline:
             objects.append(self.repository.write_run_manifest(manifest))
             return PipelineRunResult(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.NO_DRAW.value,
                 object_count=len(objects),
@@ -281,7 +293,7 @@ class SouthernPipeline:
         except Exception as exc:
             manifest = RunManifest(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.FAILED,
                 source_lineage=self.source_lineage,
@@ -304,7 +316,7 @@ class SouthernPipeline:
         now = datetime.now(UTC)
         manifest = RunManifest(
             run_id=run_id,
-            region=LotteryRegion.XSMN,
+            region=self.region,
             target_date=target_date,
             status=RunStatus.NO_DRAW,
             source_lineage=SourceLineage.LIVE_SOURCE,
@@ -315,7 +327,7 @@ class SouthernPipeline:
         self.repository.write_run_manifest(manifest)
         return PipelineRunResult(
             run_id=run_id,
-            region=LotteryRegion.XSMN,
+            region=self.region,
             target_date=target_date,
             status=RunStatus.NO_DRAW.value,
             message=detail,
@@ -327,7 +339,7 @@ class SouthernPipeline:
         objects: list[StoredObject] = []
         all_draw = self.repository.read_all_silver_draw_results()
         if all_draw.empty:
-            raise ValueError('no XSMN Silver draw results are available')
+            raise ValueError(f'no {self.region_label} Silver draw results are available')
         canonical = canonical_southern_results_from_frame(all_draw)
         target_date = canonical[-1].draw_date
         try:
@@ -345,6 +357,7 @@ class SouthernPipeline:
                 gold_tables=gold_tables,
                 statuses=statuses,
                 today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
+                region=self.region,
             )
             require_quality(report)
             objects.extend(self.repository.replace_silver_loto_daily(all_loto))
@@ -353,7 +366,7 @@ class SouthernPipeline:
             objects.extend(gold_objects)
             manifest = RunManifest(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.SUCCESS,
                 source_lineage=SourceLineage.DERIVED_REBUILD,
@@ -372,16 +385,16 @@ class SouthernPipeline:
             objects.extend([snapshot, latest])
             return PipelineRunResult(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.SUCCESS.value,
                 object_count=len(objects),
-                message=f'rebuilt XSMN Gold dataset version {run_id}',
+                message=f'rebuilt {self.region_label} Gold dataset version {run_id}',
             )
         except Exception as exc:
             failure = RunManifest(
                 run_id=run_id,
-                region=LotteryRegion.XSMN,
+                region=self.region,
                 target_date=target_date,
                 status=RunStatus.FAILED,
                 source_lineage=SourceLineage.DERIVED_REBUILD,

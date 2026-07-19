@@ -19,6 +19,7 @@ class RunStatus(StrEnum):
 class LotteryRegion(StrEnum):
     XSMB = 'xsmb'
     XSMN = 'xsmn'
+    XSMT = 'xsmt'
 
 
 class SourceLineage(StrEnum):

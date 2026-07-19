@@ -363,10 +363,18 @@ class DataLakeRepository:
 
 
 class SouthernDataLakeRepository(DataLakeRepository):
-    """XSMN repository using the same lake contract in an independent store."""
+    """Station-grain XSMN/XSMT repository using an independent store."""
 
-    def __init__(self, store: ObjectStore, *, gold_cache_control: str) -> None:
-        super().__init__(store, gold_cache_control=gold_cache_control, region=LotteryRegion.XSMN)
+    def __init__(
+        self,
+        store: ObjectStore,
+        *,
+        gold_cache_control: str,
+        region: LotteryRegion = LotteryRegion.XSMN,
+    ) -> None:
+        if region not in {LotteryRegion.XSMN, LotteryRegion.XSMT}:
+            raise ValueError('station-grain repository region must be xsmn or xsmt')
+        super().__init__(store, gold_cache_control=gold_cache_control, region=region)
 
     def bronze_complete(self, draw_date: date) -> bool:
         prefix = self._bronze_prefix(draw_date)
@@ -471,7 +479,10 @@ class SouthernDataLakeRepository(DataLakeRepository):
                 object_metadata=object_metadata,
                 force=force,
                 stable_json_fields=stable_metadata if key.endswith('/metadata.json') else None,
-                conflict_message=f'XSMN Bronze object differs for {draw_date}: {key}; use --force to replace it',
+                conflict_message=(
+                    f'{self.region.value.upper()} Bronze object differs for {draw_date}: '
+                    f'{key}; use --force to replace it'
+                ),
             )
             for key, payload in zip(keys, payloads, strict=True)
         ]
@@ -544,6 +555,17 @@ class SouthernDataLakeRepository(DataLakeRepository):
             pd.concat(frames, ignore_index=True)
             .sort_values(['draw_date', 'station_code', 'prize_group', 'prize_order'], kind='stable')
             .reset_index(drop=True)
+        )
+
+
+class CentralDataLakeRepository(SouthernDataLakeRepository):
+    """XSMT repository with its own object store and publication manifest."""
+
+    def __init__(self, store: ObjectStore, *, gold_cache_control: str) -> None:
+        super().__init__(
+            store,
+            gold_cache_control=gold_cache_control,
+            region=LotteryRegion.XSMT,
         )
 
 

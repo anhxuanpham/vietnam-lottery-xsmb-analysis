@@ -1,6 +1,6 @@
-# Cloudflare R2 setup for two data lakes
+# Cloudflare R2 setup for three data lakes
 
-## 1. Authenticate Wrangler and create both buckets
+## 1. Authenticate Wrangler and create all buckets
 
 Bucket creation is an administrative action; the ETL itself uses the S3-compatible API.
 
@@ -8,16 +8,17 @@ Bucket creation is an administrative action; the ETL itself uses the S3-compatib
 npx wrangler login
 npx wrangler r2 bucket create xsmb-data-lake
 npx wrangler r2 bucket create xsmn-data-lake
+npx wrangler r2 bucket create xsmt-data-lake
 npx wrangler r2 bucket list
 ```
 
-Bucket names are examples and may be changed. Keep the two buckets independent; do not point both environment variables at the same bucket.
+Bucket names are examples and may be changed. Keep all three buckets independent.
 
 ## 2. Create least-privilege S3 credentials
 
-In Cloudflare R2, create an API token with **Object Read & Write** permission and scope it to the two selected buckets. Record the **Access Key ID** and **Secret Access Key** when Cloudflare displays them; the secret is shown once.
+In Cloudflare R2, create an API token with **Object Read & Write** permission and scope it to the three selected buckets. Record the **Access Key ID** and **Secret Access Key** when Cloudflare displays them; the secret is shown once.
 
-One token can cover both buckets:
+One token can cover all three buckets:
 
 ```dotenv
 ETL_ENV=production
@@ -26,6 +27,7 @@ R2_ACCESS_KEY_ID=<access-key-id>
 R2_SECRET_ACCESS_KEY=<secret-access-key>
 R2_BUCKET_NAME=xsmb-data-lake
 R2_XSMN_BUCKET_NAME=xsmn-data-lake
+R2_XSMT_BUCKET_NAME=xsmt-data-lake
 ```
 
 For stricter credential isolation, create a second token scoped only to XSMN and add:
@@ -37,7 +39,7 @@ R2_XSMN_SECRET_ACCESS_KEY=<xsmn-secret-access-key>
 R2_XSMN_ENDPOINT_URL=<only-if-an-explicit-endpoint-is-required>
 ```
 
-Blank XSMN overrides fall back to the shared account and credentials. The standard endpoint is derived as `https://<account-id>.r2.cloudflarestorage.com`, and the S3 region is `auto`.
+Blank XSMN/XSMT overrides fall back to the shared account and credentials. The standard endpoint is derived as `https://<account-id>.r2.cloudflarestorage.com`, and the S3 region is `auto`.
 
 Never put credentials in source, documentation, screenshots, fixtures, shell history, or command output. `.env` is ignored by Git.
 
@@ -57,9 +59,15 @@ uv run lottery-etl run \
   --region xsmn \
   --target-date 2026-07-16 \
   --fixture tests/fixtures/valid-xsmn-result-page.html
+
+uv run lottery-etl run \
+  --storage r2 \
+  --region xsmt \
+  --target-date 2026-07-18 \
+  --fixture tests/fixtures/valid-xsmt-result-page.html
 ```
 
-Confirm both buckets independently contain Bronze, monthly Silver, Gold CSV/Parquet, quality, run manifests, a snapshot manifest, and `manifests/latest.json`. The XSMN bucket should also contain `gold/latest/dim-station.*`.
+Confirm all three buckets independently contain Bronze, monthly Silver, Gold CSV/Parquet, quality, run manifests, a snapshot manifest, and `manifests/latest.json`. The XSMN/XSMT buckets should also contain `gold/latest/dim-station.*`.
 
 Fixture runs use `test_fixture` lineage. Do not use a fixture to seed production history.
 
@@ -72,8 +80,9 @@ Under repository Settings → Secrets and variables → Actions, create:
 - `R2_SECRET_ACCESS_KEY`
 - `R2_BUCKET_NAME`
 - `R2_XSMN_BUCKET_NAME`
+- `R2_XSMT_BUCKET_NAME`
 
-Only add the optional `R2_XSMN_*` secrets when using a separate XSMN account/token. Optional repository variables are `R2_PUBLIC_BASE_URL` and `SOURCE_BASE_URL`.
+Only add optional `R2_XSMN_*` or `R2_XSMT_*` secrets when using a separate regional account/token. Optional repository variables include the public base URLs, fallback source URLs, and `SOURCE_BASE_URL`.
 
 `XSMN_FALLBACK_BASE_URL` is also optional and defaults to `https://xskt.com.vn`. It is not a credential. Set it only when the independent historical reconciliation source must be overridden.
 
@@ -86,13 +95,14 @@ Keep Bronze, Silver, quality reports, and manifests private. Route only the inte
 ```text
 https://data.example.com/xsmb/gold/latest/fact-loto-daily.csv
 https://data.example.com/xsmn/gold/latest/fact-loto-daily.csv
+https://data.example.com/xsmt/gold/latest/fact-loto-daily.csv
 ```
 
-Ensure the two routes target the correct buckets. Do not use expiring presigned URLs for long-term BI scheduled refresh.
+Ensure every route targets the correct bucket. Do not use expiring presigned URLs for long-term BI scheduled refresh.
 
 ## 6. Activate the schedule
 
-Run `Daily Vietnam Lottery ETL` manually with `region=all` and a known date. Verify both Action results, both latest manifests, listed checksums, and public CSV routes. The cron then runs at 18:35 Asia/Ho_Chi_Minh.
+Run `Daily Vietnam Lottery ETL` manually with `region=all` and a known date. Verify all three Action results, latest manifests, listed checksums, and public CSV routes. The cron then runs at 18:35 Asia/Ho_Chi_Minh.
 
 ## Troubleshooting S3 signatures
 

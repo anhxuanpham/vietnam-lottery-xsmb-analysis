@@ -34,26 +34,34 @@ class Settings(BaseSettings):
     etl_env: EtlEnvironment = EtlEnvironment.LOCAL
     source_base_url: HttpUrl = HttpUrl('https://xoso.com.vn')
     xsmn_fallback_base_url: HttpUrl = HttpUrl('https://xskt.com.vn')
+    xsmt_fallback_base_url: HttpUrl = HttpUrl('https://xskt.com.vn')
     http_timeout_seconds: float = Field(default=30.0, gt=0)
     http_max_retries: int = Field(default=3, ge=0)
     http_retry_backoff_seconds: float = Field(default=1.0, ge=0)
     local_data_dir: Path = Path('data')
     local_output_dir: Path = Path('output')
     local_xsmn_output_dir: Path = Path('output-xsmn')
+    local_xsmt_output_dir: Path = Path('output-xsmt')
 
     r2_account_id: str | None = None
     r2_access_key_id: SecretStr | None = None
     r2_secret_access_key: SecretStr | None = None
     r2_bucket_name: str = 'xsmb-data-lake'
     r2_xsmn_bucket_name: str = 'xsmn-data-lake'
+    r2_xsmt_bucket_name: str = 'xsmt-data-lake'
     r2_endpoint_url: HttpUrl | None = None
     r2_xsmn_account_id: str | None = None
     r2_xsmn_access_key_id: SecretStr | None = None
     r2_xsmn_secret_access_key: SecretStr | None = None
     r2_xsmn_endpoint_url: HttpUrl | None = None
+    r2_xsmt_account_id: str | None = None
+    r2_xsmt_access_key_id: SecretStr | None = None
+    r2_xsmt_secret_access_key: SecretStr | None = None
+    r2_xsmt_endpoint_url: HttpUrl | None = None
     r2_region: str = 'auto'
     r2_public_base_url: HttpUrl | None = None
     r2_xsmn_public_base_url: HttpUrl | None = None
+    r2_xsmt_public_base_url: HttpUrl | None = None
     r2_connect_timeout_seconds: float = Field(default=10.0, gt=0)
     r2_read_timeout_seconds: float = Field(default=60.0, gt=0)
     r2_max_retries: int = Field(default=5, ge=0)
@@ -79,6 +87,16 @@ class Settings(BaseSettings):
             return str(self.r2_xsmn_endpoint_url).rstrip('/')
         if self.r2_xsmn_account_id:
             return f'https://{self.r2_xsmn_account_id}.r2.cloudflarestorage.com'
+        return self.resolved_r2_endpoint_url
+
+    @property
+    def resolved_xsmt_r2_endpoint_url(self) -> str | None:
+        """Return the optional XSMT endpoint, falling back to the XSMB account."""
+
+        if self.r2_xsmt_endpoint_url is not None:
+            return str(self.r2_xsmt_endpoint_url).rstrip('/')
+        if self.r2_xsmt_account_id:
+            return f'https://{self.r2_xsmt_account_id}.r2.cloudflarestorage.com'
         return self.resolved_r2_endpoint_url
 
     @model_validator(mode='after')

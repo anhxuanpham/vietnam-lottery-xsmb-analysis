@@ -294,6 +294,7 @@ export default function Home() {
           <div className="region-switch" aria-label="Chọn miền">
             <button className="active" type="button">XSMB <span>Sẵn sàng</span></button>
             <button disabled type="button" title="Cần tải Gold XSMN về frontend">XSMN <span>Chờ Gold</span></button>
+            <button disabled type="button" title="Cần tải Gold XSMT về frontend">XSMT <span>Chờ Gold</span></button>
           </div>
           <label>
             Cửa sổ phân tích
@@ -385,6 +386,7 @@ export default function Home() {
           <article><span className="health-dot good" /><div><small>Nguồn hiện tại</small><strong>{data.source}</strong></div><em>LOCAL</em></article>
           <article><span className="health-dot good" /><div><small>Ngày mới nhất</small><strong>{formatDate(data.latest.date)}</strong></div><em>FRESH</em></article>
           <article><span className="health-dot pending" /><div><small>Gold XSMN</small><strong>Chưa tải vào frontend</strong></div><em>PENDING</em></article>
+          <article><span className="health-dot pending" /><div><small>Gold XSMT</small><strong>ETL đã hỗ trợ, frontend chưa tải</strong></div><em>PENDING</em></article>
         </div>
       </section>
 

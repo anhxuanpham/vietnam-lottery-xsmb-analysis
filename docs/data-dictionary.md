@@ -1,27 +1,27 @@
 # Data dictionary
 
-XSMB and XSMN use the same Gold filenames in different data lakes. All dates use the official Vietnam draw date. Facts carry the publication `run_id`; dimensions are deterministic and versioned by the manifest that lists them.
+XSMB, XSMN, and XSMT use the same Gold filenames in different data lakes. All dates use the official Vietnam draw date. Facts carry the publication `run_id`; dimensions are deterministic and versioned by the manifest that lists them.
 
 ## Grain and cardinality
 
-| Table | XSMB | XSMN |
+| Table | XSMB | XSMN/XSMT |
 |---|---|---|
 | `fact-draw-result` | 27 rows/date; key `draw_date, prize_group, prize_order` | 18 rows/station/date; key also includes `station_code` |
 | `fact-loto-daily` | 100 rows/date; frequency sum 27 | 100 rows/station/date; frequency sum 18 |
 | `fact-special-prize` | 1 row/date | 1 row/station/date |
 | `dim-station` | not present | 1 row per observed station |
 
-An XSMN date contains the three or four stations represented by the source page. Station-level facts are never aggregated into the XSMB grain.
+An XSMN date contains three or four stations; an XSMT date contains two or three. Station-level facts are never aggregated into the XSMB grain.
 
 ## `fact-draw-result`
 
 | Column | Type | Meaning |
 |---|---|---|
 | `draw_date` | date | Official draw date |
-| `station_code` | string | XSMN only: stable code derived from the station link |
-| `station_order` | integer | XSMN only: one-based source-page column order |
-| `station_name` | string | XSMN only: displayed station/province name |
-| `station_url` | string | XSMN only: absolute station source URL |
+| `station_code` | string | XSMN/XSMT only: stable code derived from the station link |
+| `station_order` | integer | XSMN/XSMT only: one-based source-page column order |
+| `station_name` | string | XSMN/XSMT only: displayed station/province name |
+| `station_url` | string | XSMN/XSMT only: absolute station source URL |
 | `prize_group` | string | XSMB: `special`, `prize1`…`prize7`; XSMN also has `prize8` |
 | `prize_order` | integer | One-based order inside the prize group |
 | `prize_width` | integer | Official width: XSMB 2–5; XSMN 2–6 |
@@ -38,10 +38,10 @@ An XSMN date contains the three or four stations represented by the source page.
 | Column | Type | Meaning |
 |---|---|---|
 | `draw_date` | date | Official draw date |
-| `station_code` | string | XSMN only: station grain |
-| `station_name` | string | XSMN only: display name |
+| `station_code` | string | XSMN/XSMT only: station grain |
+| `station_name` | string | XSMN/XSMT only: display name |
 | `number_2d` | string | Every value from `00` through `99` |
-| `frequency` | integer | Occurrences in that XSMB draw or XSMN station draw |
+| `frequency` | integer | Occurrences in that XSMB draw or XSMN/XSMT station draw |
 | `appeared` | boolean | `frequency > 0` |
 | `draws_since_previous` | nullable integer | Draw-position distance to the most recent prior appearance |
 | `calendar_days_since_previous` | nullable integer | Calendar-day distance to the most recent prior appearance |
@@ -60,8 +60,8 @@ Business key is `draw_date` for XSMB and `draw_date, station_code` for XSMN.
 | Column | Type | Meaning |
 |---|---|---|
 | `draw_date` | date | Official draw date |
-| `station_code` | string | XSMN only |
-| `station_name` | string | XSMN only |
+| `station_code` | string | XSMN/XSMT only |
+| `station_name` | string | XSMN/XSMT only |
 | `full_number` | integer | Numeric special-prize value |
 | `formatted_number` | string | XSMB five digits; XSMN six digits |
 | `tail_2d` | string | Final two digits |
@@ -71,7 +71,7 @@ Business key is `draw_date` for XSMB and `draw_date, station_code` for XSMN.
 | `is_even_tail` | boolean | Whether the final digit is even |
 | `run_id` | string | Gold dataset version |
 
-## `dim-station` (XSMN only)
+## `dim-station` (XSMN/XSMT only)
 
 | Column | Type | Meaning |
 |---|---|---|

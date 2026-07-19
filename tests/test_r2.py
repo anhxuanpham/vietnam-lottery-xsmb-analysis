@@ -106,3 +106,21 @@ def test_r2_store_selects_an_independent_xsmn_bucket() -> None:
 
     assert store.bucket == 'south'
     assert client.last_put['Bucket'] == 'south'
+
+
+def test_r2_store_selects_an_independent_xsmt_bucket() -> None:
+    settings = Settings(
+        _env_file=None,
+        r2_account_id='account',
+        r2_access_key_id='access',
+        r2_secret_access_key='secret',
+        r2_bucket_name='north',
+        r2_xsmt_bucket_name='central',
+    )
+    client = FakeS3Client()
+    store = R2ObjectStore(settings, client=client, region=LotteryRegion.XSMT)
+
+    store.put_bytes('manifests/latest.json', b'{}', content_type='application/json')
+
+    assert store.bucket == 'central'
+    assert client.last_put['Bucket'] == 'central'

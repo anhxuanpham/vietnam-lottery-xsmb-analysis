@@ -14,6 +14,7 @@ def test_local_settings_do_not_require_r2_credentials() -> None:
     assert str(settings.source_base_url).rstrip('/') == 'https://xoso.com.vn'
     assert str(settings.xsmn_fallback_base_url).rstrip('/') == 'https://xskt.com.vn'
     assert settings.resolved_r2_endpoint_url is None
+    assert str(settings.xsmt_fallback_base_url).rstrip('/') == 'https://xskt.com.vn'
 
 
 def test_env_example_loads_with_blank_optional_r2_values() -> None:
@@ -24,6 +25,8 @@ def test_env_example_loads_with_blank_optional_r2_values() -> None:
     assert settings.r2_endpoint_url is None
     assert settings.r2_xsmn_bucket_name == 'xsmn-data-lake'
     assert settings.local_xsmn_output_dir == Path('output-xsmn')
+    assert settings.r2_xsmt_bucket_name == 'xsmt-data-lake'
+    assert settings.local_xsmt_output_dir == Path('output-xsmt')
     assert str(settings.xsmn_fallback_base_url).rstrip('/') == 'https://xskt.com.vn'
 
 
@@ -37,6 +40,7 @@ def test_r2_endpoint_is_derived_without_exposing_secret() -> None:
 
     assert settings.resolved_r2_endpoint_url == 'https://account-id.r2.cloudflarestorage.com'
     assert settings.resolved_xsmn_r2_endpoint_url == settings.resolved_r2_endpoint_url
+    assert settings.resolved_xsmt_r2_endpoint_url == settings.resolved_r2_endpoint_url
     assert 'super-secret' not in repr(settings)
 
 

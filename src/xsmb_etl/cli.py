@@ -17,8 +17,7 @@ from xsmb_etl.migration import HistoricalMigrator
 from xsmb_etl.pipeline import Pipeline
 from xsmb_etl.quality import build_quality_report, require_quality
 from xsmb_etl.r2 import R2ObjectStore
-from xsmb_etl.repository import DataLakeRepository
-from xsmb_etl.repository import SouthernDataLakeRepository
+from xsmb_etl.repository import CentralDataLakeRepository, DataLakeRepository, SouthernDataLakeRepository
 from xsmb_etl.run_models import LotteryRegion, SourceLineage
 from xsmb_etl.storage import LocalObjectStore
 from xsmb_etl.transform import canonical_results_from_frame, loto_daily_frame
@@ -31,6 +30,8 @@ from xsmb_etl.xsmn_transform import (
     southern_draw_results_frame,
     southern_loto_daily_frame,
 )
+from xsmb_etl.xsmt_extract import CentralResultExtractor, parse_central_result_page
+from xsmb_etl.xsmt_pipeline import CentralPipeline
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -40,12 +41,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     configure_logging(settings.log_level)
 
     if args.command == 'run':
-        target_date = args.target_date or _default_target_date()
         regions = _regions(args.region)
         if args.fixture and len(regions) > 1:
-            parser.error('--fixture requires --region xsmb or --region xsmn')
+            parser.error('--fixture requires one explicit region')
         results = []
         for region in regions:
+            target_date = args.target_date or _default_target_date(region)
             repository = _repository_for_args(settings, args, region, multiple=len(regions) > 1)
             pipeline = _pipeline(region, repository, settings, fixture=args.fixture, target_date=target_date)
             results.append(pipeline.run(target_date, force=args.force))
@@ -71,7 +72,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == 'validate':
         regions = _regions(args.region)
         if args.fixture and len(regions) > 1:
-            parser.error('--fixture requires --region xsmb or --region xsmn')
+            parser.error('--fixture requires one explicit region')
         reports = {}
         for region in regions:
             repository = _repository_for_args(settings, args, region, multiple=len(regions) > 1)
@@ -117,7 +118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog='lottery-etl',
-        description='XSMB/XSMN ETL with independent local or R2 data lakes',
+        description='XSMB/XSMN/XSMT ETL with independent local or R2 data lakes',
     )
     subparsers = parser.add_subparsers(dest='command', required=True)
 
@@ -162,7 +163,7 @@ def _add_storage_options(parser: argparse.ArgumentParser, *, include_region: boo
     if include_region:
         parser.add_argument(
             '--region',
-            choices=(LotteryRegion.XSMB.value, LotteryRegion.XSMN.value, 'all'),
+            choices=(LotteryRegion.XSMB.value, LotteryRegion.XSMN.value, LotteryRegion.XSMT.value, 'all'),
             default=LotteryRegion.XSMB.value,
             help='data lake to operate on; defaults to xsmb',
         )
@@ -175,13 +176,20 @@ def _repository(
     region: LotteryRegion,
     *,
     output: Path | None = None,
-) -> DataLakeRepository | SouthernDataLakeRepository:
+) -> DataLakeRepository | SouthernDataLakeRepository | CentralDataLakeRepository:
     use_r2 = storage == 'r2' or (storage is None and output is None and settings.etl_env is EtlEnvironment.PRODUCTION)
     if use_r2:
         store = R2ObjectStore(settings, region=region)
     else:
-        default_output = settings.local_xsmn_output_dir if region is LotteryRegion.XSMN else settings.local_output_dir
+        default_outputs = {
+            LotteryRegion.XSMB: settings.local_output_dir,
+            LotteryRegion.XSMN: settings.local_xsmn_output_dir,
+            LotteryRegion.XSMT: settings.local_xsmt_output_dir,
+        }
+        default_output = default_outputs[region]
         store = LocalObjectStore(output or default_output)
+    if region is LotteryRegion.XSMT:
+        return CentralDataLakeRepository(store, gold_cache_control=settings.gold_cache_control)
     if region is LotteryRegion.XSMN:
         return SouthernDataLakeRepository(store, gold_cache_control=settings.gold_cache_control)
     return DataLakeRepository(store, gold_cache_control=settings.gold_cache_control)
@@ -193,7 +201,7 @@ def _repository_for_args(
     region: LotteryRegion,
     *,
     multiple: bool,
-) -> DataLakeRepository | SouthernDataLakeRepository:
+) -> DataLakeRepository | SouthernDataLakeRepository | CentralDataLakeRepository:
     output = getattr(args, 'output', None)
     if output is not None and multiple:
         output = output / region.value
@@ -205,7 +213,7 @@ def _repository_for_args(
 
 def _pipeline(
     region: LotteryRegion,
-    repository: DataLakeRepository | SouthernDataLakeRepository,
+    repository: DataLakeRepository | SouthernDataLakeRepository | CentralDataLakeRepository,
     settings: Settings,
     *,
     fixture: Path | None = None,
@@ -214,15 +222,17 @@ def _pipeline(
     if fixture is not None and target_date is None:
         raise ValueError('target_date is required with a fixture')
     lineage = SourceLineage.TEST_FIXTURE if fixture else SourceLineage.LIVE_SOURCE
-    if region is LotteryRegion.XSMN:
+    if region in {LotteryRegion.XSMN, LotteryRegion.XSMT}:
         if not isinstance(repository, SouthernDataLakeRepository):
-            raise TypeError('XSMN requires SouthernDataLakeRepository')
-        extractor = (
-            _southern_fixture_extractor(fixture, target_date, settings)
-            if fixture and target_date
-            else SouthernResultExtractor(settings)
-        )
-        return SouthernPipeline(repository, extractor, source_lineage=lineage)
+            raise TypeError(f'{region.value.upper()} requires a station-grain repository')
+        if fixture and target_date:
+            extractor = _regional_fixture_extractor(fixture, target_date, settings, region)
+        elif region is LotteryRegion.XSMT:
+            extractor = CentralResultExtractor(settings)
+        else:
+            extractor = SouthernResultExtractor(settings)
+        pipeline_class = CentralPipeline if region is LotteryRegion.XSMT else SouthernPipeline
+        return pipeline_class(repository, extractor, source_lineage=lineage)
     if isinstance(repository, SouthernDataLakeRepository):
         raise TypeError('XSMB requires DataLakeRepository')
     extractor = (
@@ -245,10 +255,19 @@ def _fixture_extractor(path: Path, target_date: date, settings: Settings):
     return FixtureExtractor()
 
 
-def _southern_fixture_extractor(path: Path, target_date: date, settings: Settings):
+def _regional_fixture_extractor(
+    path: Path,
+    target_date: date,
+    settings: Settings,
+    region: LotteryRegion,
+):
     raw_response = path.read_bytes()
-    source_url = SouthernResultExtractor(settings).build_source_url(target_date)
-    result = parse_southern_result_page(raw_response, selected_date=target_date, source_url=source_url)
+    if region is LotteryRegion.XSMT:
+        source_url = CentralResultExtractor(settings).build_source_url(target_date)
+        result = parse_central_result_page(raw_response, selected_date=target_date, source_url=source_url)
+    else:
+        source_url = SouthernResultExtractor(settings).build_source_url(target_date)
+        result = parse_southern_result_page(raw_response, selected_date=target_date, source_url=source_url)
 
     class FixtureExtractor:
         def extract(self, selected_date: date) -> SouthernExtractedResult:
@@ -263,22 +282,27 @@ def _validate(
     region: LotteryRegion,
     args,
     settings: Settings,
-    repository: DataLakeRepository | SouthernDataLakeRepository,
+    repository: DataLakeRepository | SouthernDataLakeRepository | CentralDataLakeRepository,
 ):
     run_id = 'validation-only'
-    if region is LotteryRegion.XSMN:
+    if region in {LotteryRegion.XSMN, LotteryRegion.XSMT}:
         if not isinstance(repository, SouthernDataLakeRepository):
-            raise TypeError('XSMN requires SouthernDataLakeRepository')
+            raise TypeError(f'{region.value.upper()} requires a station-grain repository')
         if args.fixture:
             if args.target_date is None:
                 raise ValueError('--target-date is required with --fixture')
-            extracted = _southern_fixture_extractor(args.fixture, args.target_date, settings).extract(args.target_date)
+            extracted = _regional_fixture_extractor(
+                args.fixture,
+                args.target_date,
+                settings,
+                region,
+            ).extract(args.target_date)
             draw = southern_draw_results_frame([extracted.result], run_id)
             canonical = [extracted.result]
         else:
             draw = repository.read_all_silver_draw_results()
             if draw.empty:
-                raise ValueError('no XSMN Silver draw results are available')
+                raise ValueError(f'no {region.value.upper()} Silver draw results are available')
             canonical = canonical_southern_results_from_frame(draw)
         loto = southern_loto_daily_frame(draw, run_id=run_id)
         statuses = {result.draw_date: DrawStatus.SUCCESS for result in canonical}
@@ -291,6 +315,7 @@ def _validate(
             gold_tables=gold,
             statuses=statuses,
             today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
+            region=region,
         )
 
     if args.fixture:
@@ -322,13 +347,18 @@ def _validate(
 
 def _regions(value: str) -> tuple[LotteryRegion, ...]:
     if value == 'all':
-        return (LotteryRegion.XSMB, LotteryRegion.XSMN)
+        return (LotteryRegion.XSMB, LotteryRegion.XSMN, LotteryRegion.XSMT)
     return (LotteryRegion(value),)
 
 
-def _default_target_date() -> date:
+def _default_target_date(region: LotteryRegion) -> date:
     now = datetime.now(ZoneInfo('Asia/Ho_Chi_Minh'))
-    return now.date() if now.time() >= time(18, 35) else now.date() - timedelta(days=1)
+    completed_at = {
+        LotteryRegion.XSMB: time(18, 35),
+        LotteryRegion.XSMN: time(16, 35),
+        LotteryRegion.XSMT: time(17, 35),
+    }[region]
+    return now.date() if now.time() >= completed_at else now.date() - timedelta(days=1)
 
 
 def _date(value: str) -> date:

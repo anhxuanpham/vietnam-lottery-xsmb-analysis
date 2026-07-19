@@ -24,7 +24,11 @@ class R2ConfigurationError(RuntimeError):
 
 
 def create_r2_client(settings: Settings, region: LotteryRegion = LotteryRegion.XSMB):
-    if region is LotteryRegion.XSMN:
+    if region is LotteryRegion.XSMT:
+        endpoint_url = settings.resolved_xsmt_r2_endpoint_url
+        access_key = settings.r2_xsmt_access_key_id or settings.r2_access_key_id
+        secret_key = settings.r2_xsmt_secret_access_key or settings.r2_secret_access_key
+    elif region is LotteryRegion.XSMN:
         endpoint_url = settings.resolved_xsmn_r2_endpoint_url
         access_key = settings.r2_xsmn_access_key_id or settings.r2_access_key_id
         secret_key = settings.r2_xsmn_secret_access_key or settings.r2_secret_access_key
@@ -68,7 +72,12 @@ class R2ObjectStore:
     ) -> None:
         self.settings = settings
         self.region = region
-        self.bucket = settings.r2_xsmn_bucket_name if region is LotteryRegion.XSMN else settings.r2_bucket_name
+        buckets = {
+            LotteryRegion.XSMB: settings.r2_bucket_name,
+            LotteryRegion.XSMN: settings.r2_xsmn_bucket_name,
+            LotteryRegion.XSMT: settings.r2_xsmt_bucket_name,
+        }
+        self.bucket = buckets[region]
         if not self.bucket:
             raise R2ConfigurationError(f'missing {region.value.upper()} R2 bucket name')
         self.client = client or create_r2_client(settings, region)

@@ -239,26 +239,28 @@ CSV phù hợp với Power BI/Tableau; Parquet phù hợp với Pandas và DuckD
 
 ### 7.4 Xem dashboard frontend local
 
-Frontend demo nằm trong `frontend/`. Bản này không kết nối R2 và không đọc credential; nó export dữ liệu XSMB lịch sử đang có trong repo thành payload tĩnh để mày xem model ngay:
+Frontend nằm trong `frontend/`. Worker đọc JSON gọn từ một bucket serving riêng; trình duyệt không nhận credential và không đọc trực tiếp Gold Parquet. Ba snapshot đã bundle giúp local dev chạy ngay:
 
 ```bash
 cd frontend
 npm ci
-npm run data:refresh
 npm run dev
 ```
 
-Mở URL được in trong terminal, thường là `http://localhost:3000`. Dashboard hiện có heatmap `00`–`99`, model tần suất, model khoảng vắng, model cân bằng 60/40, backtest 90 kỳ và tín hiệu đà ngắn hạn. XSMN và XSMT được đánh dấu `Chờ Gold` cho tới khi frontend được nối vào Gold thật; frontend không dựng dữ liệu region giả.
+Mở URL được in trong terminal, thường là `http://localhost:3000`. Dashboard có đủ XSMB/XSMN/XSMT, chọn đài, heatmap `00`–`99`, ba heuristic và walk-forward backtest. Mỗi model chỉ chạy trên một đài nên không nhìn trước kết quả đài khác cùng ngày.
+
+Muốn làm mới snapshot bundle từ ba lake R2 đang publish, chạy `npm run data:refresh`; lệnh này đọc credential từ `.env` ở root và kiểm tra checksum theo manifest trước khi ghi JSON.
 
 Các model chỉ dùng để mô tả và so sánh lịch sử, không phải dự báo xác suất trúng hoặc khuyến nghị đặt cược. Hướng dẫn chi tiết nằm tại [`frontend/README.md`](frontend/README.md).
 
 ## 8. Setup GitHub Actions tự động cào mỗi ngày
 
-Ba workflow production đã có sẵn:
+Bốn workflow production đã có sẵn:
 
 - `.github/workflows/daily-etl.yml`: lấy ngày mới nhất cho XSMB, XSMN và XSMT.
 - `.github/workflows/xsmn-backfill.yml`: backfill XSMN theo từng năm từ 2010.
 - `.github/workflows/xsmt-backfill.yml`: backfill XSMT theo từng năm từ 2018.
+- `.github/workflows/dashboard-publish.yml`: health-check ba lake rồi publish JSON serving sau Daily ETL.
 
 ### 8.1 Đưa workflow lên default branch
 

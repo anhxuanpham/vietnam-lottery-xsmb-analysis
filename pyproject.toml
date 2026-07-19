@@ -1,7 +1,7 @@
 [project]
 name = "vietnam-lottery-xsmb-analysis"
 version = "0.1.0"
-description = "Daily XSMB and XSMN ETL with independent local or Cloudflare R2 data lakes."
+description = "Daily XSMB, XSMN, and XSMT ETL with independent local or Cloudflare R2 data lakes."
 authors = [
     {name = "Khiem Doan", email = "doankhiem.crazy@gmail.com"},
 ]

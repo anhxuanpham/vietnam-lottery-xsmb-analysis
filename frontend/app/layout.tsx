@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Lôtô Lab — Vietnam Lottery Analytics",
-  description: "Dashboard mô tả dữ liệu XSMB/XSMN với heatmap, model lab và backtest minh bạch.",
+  description: "Dashboard mô tả dữ liệu XSMB/XSMN/XSMT với heatmap, model lab và backtest minh bạch.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

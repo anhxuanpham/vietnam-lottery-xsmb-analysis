@@ -142,7 +142,7 @@ XSMN and XSMT Gold add `dim-station` and station fields to all facts. Gold CSV f
 
 - `ci.yml` runs Ruff, pytest, all three offline fixture pipelines, and frontend lint/type/build/API tests without production secrets.
 - `daily-etl.yml` runs all three independent R2 lakes at 18:35 Vietnam time and supports manual region, target-date, and force inputs.
-- `dashboard-publish.yml` runs at 20:00 Vietnam time, requires current-date healthy manifests, exports compact station-grain JSON, and updates the private Sites serving bucket.
+- `dashboard-publish.yml` runs at 20:00 Vietnam time, validates healthy manifests against the 18:35 draw cutoff, exports compact station-grain JSON, and updates the private Sites serving bucket.
 - `xsmn-backfill.yml` runs resumable yearly XSMN batches from 2010 onward, one year at a time, and publishes Gold once per batch. The current-year batch stops at yesterday because the daily ETL owns today's draw after publication time.
 - `xsmt-backfill.yml` does the same for XSMT from 2018 onward using its own concurrency group and bucket.
 - The daily workflow has read-only repository permissions and writes generated data to R2 rather than committing it to Git.

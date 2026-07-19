@@ -81,8 +81,8 @@ health gate. `--storage local --output data/lake` checks local lakes; with `--re
 ## Dashboard publication
 
 `Publish Lottery Dashboard Data` runs daily at 20:00 Vietnam time, after the 18:35 Daily ETL window, and can also be
-dispatched manually. It first runs the metadata-only three-lake health gate, requires all three publication dates to
-match the current Vietnam date, downloads only the published
+dispatched manually. It first runs the metadata-only three-lake health gate and requires all three publication dates
+to match the expected draw date (yesterday before 18:35, today from 18:35 onward), then downloads only the published
 `fact-draw-result.parquet` plus `dim-station.parquet` where applicable, exports 455 recent draws per station, and
 uploads compact JSON to the Sites Worker. The three source lakes stay private; the browser only reads the separate
 `LOTTERY_DATA` serving bucket.

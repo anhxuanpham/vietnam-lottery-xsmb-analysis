@@ -70,7 +70,12 @@ jobs:
         shell: bash
         run: |
           uv run lottery-etl status --storage r2 --region all --json | tee lake-status.json
-          expected_date="$(TZ=Asia/Ho_Chi_Minh date +%F)"
+          vietnam_time="$(TZ=Asia/Ho_Chi_Minh date +%H%M)"
+          if (( 10#$vietnam_time < 1835 )); then
+            expected_date="$(TZ=Asia/Ho_Chi_Minh date --date='yesterday' +%F)"
+          else
+            expected_date="$(TZ=Asia/Ho_Chi_Minh date +%F)"
+          fi
           jq --exit-status --arg expected_date "$expected_date" \
             'all(.[]; .target_date == $expected_date)' \
             lake-status.json >/dev/null

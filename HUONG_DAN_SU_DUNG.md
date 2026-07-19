@@ -260,7 +260,7 @@ Bốn workflow production đã có sẵn:
 - `.github/workflows/daily-etl.yml`: lấy ngày mới nhất cho XSMB, XSMN và XSMT.
 - `.github/workflows/xsmn-backfill.yml`: backfill XSMN theo từng năm từ 2010.
 - `.github/workflows/xsmt-backfill.yml`: backfill XSMT theo từng năm từ 2018.
-- `.github/workflows/dashboard-publish.yml`: 20:00 mỗi ngày, health-check đúng ngày hiện tại rồi publish JSON serving.
+- `.github/workflows/dashboard-publish.yml`: 20:00 mỗi ngày, health-check theo cutoff 18:35 rồi publish JSON serving.
 
 ### 8.1 Đưa workflow lên default branch
 

@@ -3,7 +3,8 @@ name: Publish Lottery Dashboard Data
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 13 * * *"
+    # Avoid the top-of-hour GitHub Actions scheduling hotspot.
+    - cron: "47 12 * * *"
 
 permissions:
   contents: read

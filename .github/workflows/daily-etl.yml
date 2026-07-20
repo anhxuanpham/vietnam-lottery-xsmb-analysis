@@ -20,14 +20,43 @@ on:
           - xsmt
         default: all
   schedule:
-    - cron: "35 11 * * *"
+    # Queue before the draw cutoff so GitHub scheduler delay is less likely to
+    # push the actual ETL late into the evening. The gate job below still
+    # prevents scheduled extraction before 18:35 Asia/Ho_Chi_Minh.
+    - cron: "17 11 * * *"
 
 permissions:
   contents: read
 
 jobs:
+  draw-window:
+    name: Wait for the 18:35 draw cutoff
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Wait until 18:35 Vietnam time
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: |
+          vietnam_date="$(TZ=Asia/Ho_Chi_Minh date +%F)"
+          now_epoch="$(date +%s)"
+          cutoff_epoch="$(TZ=Asia/Ho_Chi_Minh date --date="${vietnam_date} 18:35:00" +%s)"
+          wait_seconds=$((cutoff_epoch - now_epoch))
+
+          if (( wait_seconds > 1200 )); then
+            echo "Refusing an unexpected ${wait_seconds}-second wait." >&2
+            exit 1
+          fi
+          if (( wait_seconds > 0 )); then
+            echo "Scheduled early; waiting ${wait_seconds} seconds for the draw cutoff."
+            sleep "$wait_seconds"
+          else
+            echo "Draw cutoff has passed; starting ETL immediately."
+          fi
+
   etl:
     name: ETL (${{ matrix.region }})
+    needs: draw-window
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:

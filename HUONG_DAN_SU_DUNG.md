@@ -260,7 +260,7 @@ Bốn workflow production đã có sẵn:
 - `.github/workflows/daily-etl.yml`: lấy ngày mới nhất cho XSMB, XSMN và XSMT.
 - `.github/workflows/xsmn-backfill.yml`: backfill XSMN theo từng năm từ 2010.
 - `.github/workflows/xsmt-backfill.yml`: backfill XSMT theo từng năm từ 2018.
-- `.github/workflows/dashboard-publish.yml`: 20:00 mỗi ngày, health-check theo cutoff 18:35 rồi publish JSON serving.
+- `.github/workflows/dashboard-publish.yml`: 19:47 mỗi ngày, tránh đầu giờ cao tải của GitHub, health-check theo cutoff 18:35 rồi publish JSON serving.
 
 ### 8.1 Đưa workflow lên default branch
 
@@ -345,10 +345,10 @@ Workflow chạy:
 
 ```yaml
 schedule:
-  - cron: "35 11 * * *"
+  - cron: "17 11 * * *"
 ```
 
-GitHub dùng UTC, nên `11:35 UTC` tương ứng `18:35 Asia/Ho_Chi_Minh`. Mỗi lịch chạy tạo ba matrix job độc lập:
+GitHub dùng UTC, nên `11:17 UTC` tương ứng `18:17 Asia/Ho_Chi_Minh`. Workflow được queue sớm để giảm tác động của scheduler delay, nhưng một gate job sẽ chờ tới đúng 18:35 trước khi tạo ba matrix job độc lập:
 
 - `ETL (xsmb)` ghi vào bucket XSMB.
 - `ETL (xsmn)` ghi vào bucket XSMN.

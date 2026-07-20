@@ -37,7 +37,7 @@ public/data/xsmt-demo.json
 
 `npm run data:refresh` đọc `.env` ở root, kiểm tra các object Gold được `manifests/latest.json` tham chiếu và cập nhật cả ba snapshot từ R2. Payload giữ 455 kỳ gần nhất cho mỗi đài: đủ cửa sổ huấn luyện 365 kỳ cộng 90 kỳ walk-forward.
 
-GitHub Action `Publish Lottery Dashboard Data` tự chạy lúc 20:00 giờ Việt Nam sau cửa sổ Daily ETL. Nó health-check ba lake, đối chiếu ngày quay theo cutoff 18:35, export JSON gọn rồi gọi endpoint ingest có Bearer token; frontend không bao giờ chứa R2 key.
+GitHub Action `Publish Lottery Dashboard Data` tự chạy lúc 19:47 giờ Việt Nam, tránh thời điểm đầu giờ dễ bị GitHub scheduler trì hoãn. Sau cửa sổ Daily ETL, nó health-check ba lake, đối chiếu ngày quay theo cutoff 18:35, export JSON gọn rồi gọi endpoint ingest có Bearer token; frontend không bao giờ chứa R2 key.
 
 ## Kiểm tra
 

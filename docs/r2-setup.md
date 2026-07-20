@@ -102,7 +102,7 @@ Ensure every route targets the correct bucket. Do not use expiring presigned URL
 
 ## 6. Activate the schedule
 
-Run `Daily Vietnam Lottery ETL` manually with `region=all` and a known date. Verify all three Action results, latest manifests, listed checksums, and public CSV routes. The cron then runs at 18:35 Asia/Ho_Chi_Minh.
+Run `Daily Vietnam Lottery ETL` manually with `region=all` and a known date. Verify all three Action results, latest manifests, listed checksums, and public CSV routes. The cron queues at 18:17 Asia/Ho_Chi_Minh, and a gate job holds scheduled extraction until the safe 18:35 draw cutoff.
 
 ## Troubleshooting S3 signatures
 

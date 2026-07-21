@@ -123,6 +123,8 @@ A single bucket-scoped token may be authorized for all three buckets. For strict
 
 `XSMN_FALLBACK_BASE_URL` and `XSMT_FALLBACK_BASE_URL` are optional and default to `https://xskt.com.vn`. They are contacted only for strictly recognizable historical corruption: a five-digit special prize, explicit `...` placeholders, or an exact prize-8/prize-7 transposition. The extractor repairs only the affected values after the station set and every unaffected prize match the independent source; arbitrary mismatches still fail. Both raw responses and hashes are retained in Bronze.
 
+The XSMB parser also recognizes one narrow historical source defect: the complete prize-5 and prize-6 values are present but their CSS classes are exchanged. It repairs the groups only when every other prize group is complete and both exchanged groups match the opposite group's exact count and digit widths; near-matches still fail.
+
 Keep Bronze and Silver private; expose only curated `gold/latest/*.csv` and Parquet objects through controlled custom-domain routes. See [R2 setup](docs/r2-setup.md) for the activation checklist and credential troubleshooting.
 
 ## Analytics and BI

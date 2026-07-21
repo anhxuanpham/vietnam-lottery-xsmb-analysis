@@ -152,7 +152,7 @@ Hành vi khi chạy lại cùng khoảng ngày:
 - Không dùng `--force` trừ khi muốn thay thế dữ liệu đã thành công.
 - Không chạy hai tiến trình backfill cùng một region đồng thời.
 
-XSMN backfill chỉ kiểm tra và upsert Bronze/Silver theo từng ngày, sau đó rebuild Silver Loto và Gold đúng một lần ở cuối batch. Nếu tiến trình bị ngắt trước lúc publish, chạy lại đúng lệnh cũ: Bronze/Silver đã ghi được tái sử dụng và Gold chỉ đổi khi batch hoàn tất kiểm tra chất lượng.
+Backfill theo range của cả XSMB, XSMN và XSMT chỉ kiểm tra và upsert Bronze/Silver theo từng ngày, sau đó rebuild Silver Loto và Gold đúng một lần ở cuối batch. Nếu tiến trình bị ngắt trước lúc publish, chạy lại đúng lệnh cũ: Bronze/Silver đã ghi được tái sử dụng; manifest `no_draw` mới hơn Gold cũng được nhận ra để lần chạy lại hoàn tất publication.
 
 Nguồn XSMN có dữ liệu từ cuối năm 2005 nhưng format cũ dùng giải đặc biệt 5 chữ số. Với schema hiện tại, nên lấy trọn năm từ `2010-01-01` trở đi.
 

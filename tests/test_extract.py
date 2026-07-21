@@ -15,6 +15,7 @@ from xsmb_etl.extract import (
     ResultExtractor,
     parse_result_page,
 )
+from xsmb_etl.models import PrizeGroup
 
 
 FIXTURES = Path(__file__).parent / 'fixtures'
@@ -68,6 +69,46 @@ def test_parse_rejects_page_for_a_different_date(valid_result_page: bytes) -> No
             valid_result_page,
             selected_date=date(2026, 7, 15),
             source_url='https://xoso.com.vn/xsmb-15-07-2026.html',
+        )
+
+
+def test_parse_repairs_exact_historical_prize5_prize6_class_transposition(valid_result_page: bytes) -> None:
+    swapped = (
+        valid_result_page.replace(b'class="prize5"', b'class="temporary-prize"')
+        .replace(b'class="prize6"', b'class="prize5"')
+        .replace(b'class="temporary-prize"', b'class="prize6"')
+    )
+
+    result = parse_result_page(
+        swapped,
+        selected_date=TARGET_DATE,
+        source_url='https://xoso.com.vn/xsmb-16-07-2026.html',
+    )
+
+    assert [prize.formatted_number for prize in result.prizes_for(PrizeGroup.PRIZE5)] == [
+        '0452',
+        '6287',
+        '6628',
+        '4037',
+        '3904',
+        '7946',
+    ]
+    assert [prize.formatted_number for prize in result.prizes_for(PrizeGroup.PRIZE6)] == ['329', '663', '879']
+
+
+def test_parse_rejects_inexact_prize5_prize6_class_transposition(valid_result_page: bytes) -> None:
+    swapped = (
+        valid_result_page.replace(b'class="prize5"', b'class="temporary-prize"')
+        .replace(b'class="prize6"', b'class="prize5"')
+        .replace(b'class="temporary-prize"', b'class="prize6"')
+        .replace(b'>0452<', b'>452<')
+    )
+
+    with pytest.raises(PrizeCountError, match='prize5 expected 6 values, got 3'):
+        parse_result_page(
+            swapped,
+            selected_date=TARGET_DATE,
+            source_url='https://xoso.com.vn/xsmb-16-07-2026.html',
         )
 
 

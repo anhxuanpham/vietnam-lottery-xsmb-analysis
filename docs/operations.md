@@ -102,7 +102,12 @@ are evidence to investigate; the command never writes data or reclassifies an un
 `Publish Lottery Dashboard Data` runs daily at 19:47 Vietnam time, away from GitHub's top-of-hour scheduling hotspot,
 after the 18:35 Daily ETL window, and can also be dispatched manually. It first runs the metadata-only three-lake
 health gate and requires all three publication dates
-to match the expected draw date (yesterday before 18:35, today from 18:35 onward), then downloads only the published
+to match the expected draw date (yesterday before 18:35, today from 18:35 onward). It then runs the complete-history
+audit for all three lakes through that same date. Any checksum, calendar, fact-grain, loto-grain, station-dimension, or
+station-schedule finding blocks publication. JSON reports produced by the gates are retained as a workflow artifact
+for 30 days.
+If a gate fails before it can emit valid JSON, the artifact retains the report from any earlier completed gate.
+After both gates pass, the workflow downloads only the published
 `fact-draw-result.parquet` plus `dim-station.parquet` where applicable, exports 455 recent draws per station, and
 uploads compact JSON to the Sites Worker. The three source lakes stay private; the browser only reads the separate
 `LOTTERY_DATA` serving bucket.

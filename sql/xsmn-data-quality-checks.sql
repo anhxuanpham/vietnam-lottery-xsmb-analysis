@@ -22,8 +22,29 @@ FROM read_parquet('gold/latest/fact-draw-result.parquet')
 GROUP BY draw_date, station_code, prize_group, prize_order
 HAVING COUNT(*) > 1;
 
--- Must return no rows: source dates that contain neither three nor four stations.
-SELECT draw_date, COUNT(DISTINCT station_code) AS station_count
-FROM read_parquet('gold/latest/fact-draw-result.parquet')
-GROUP BY draw_date
-HAVING COUNT(DISTINCT station_code) NOT IN (3, 4);
+-- Must return no rows: station codes differ from the exact XSMN weekday calendar.
+WITH actual AS (
+    SELECT
+        draw_date,
+        string_agg(DISTINCT station_code, ',' ORDER BY station_code) AS actual_station_codes
+    FROM read_parquet('gold/latest/fact-draw-result.parquet')
+    GROUP BY draw_date
+),
+expected AS (
+    SELECT
+        draw_date,
+        CASE CAST(strftime(draw_date, '%w') AS INTEGER)
+            WHEN 0 THEN 'DL,KG,TG'
+            WHEN 1 THEN 'CM,DT,HCM'
+            WHEN 2 THEN 'BL,BTR,VT'
+            WHEN 3 THEN 'CT,DN,ST'
+            WHEN 4 THEN 'AG,BTH,TN'
+            WHEN 5 THEN 'BD,TV,VL'
+            WHEN 6 THEN 'BP,HCM,HG,LA'
+        END AS expected_station_codes
+    FROM actual
+)
+SELECT actual.draw_date, expected.expected_station_codes, actual.actual_station_codes
+FROM actual
+JOIN expected USING (draw_date)
+WHERE actual.actual_station_codes <> expected.expected_station_codes;

@@ -73,3 +73,35 @@ def test_southern_gold_and_quality_include_station_dimension() -> None:
     }
     assert set(gold['dim-station']['station_code']) == {'TN', 'AG', 'BTH'}
     assert report.passed
+
+
+def test_southern_quality_rejects_wrong_station_set_with_the_right_count() -> None:
+    result = _result()
+    wrong_station = result.stations[-1].model_copy(
+        update={
+            'station_code': 'HCM',
+            'station_name': 'TP.HCM',
+            'station_url': 'https://xoso.com.vn/xshcm-p1.html',
+        }
+    )
+    wrong_result = result.model_copy(update={'stations': (*result.stations[:-1], wrong_station)})
+    draw = southern_draw_results_frame([wrong_result], 'run-wrong-station')
+    loto = southern_loto_daily_frame(draw)
+
+    report = build_southern_quality_report(
+        [wrong_result],
+        draw,
+        loto,
+        run_id='run-wrong-station',
+        today=result.draw_date,
+    )
+    check = next(check for check in report.checks if check.name == 'station-count-per-day')
+
+    assert not check.passed
+    assert check.details['station_set_mismatches'] == [
+        {
+            'draw_date': result.draw_date.isoformat(),
+            'expected': ['AG', 'BTH', 'TN'],
+            'actual': ['AG', 'HCM', 'TN'],
+        }
+    ]

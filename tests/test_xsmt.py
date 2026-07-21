@@ -35,20 +35,25 @@ def _extracted() -> CentralExtractedResult:
 
 
 def _one_station_result(draw_date: date, station_code: str) -> CentralDailyResult:
+    return _station_set_result(draw_date, station_code)
+
+
+def _station_set_result(draw_date: date, *station_codes: str) -> CentralDailyResult:
     source_url = f'https://xoso.com.vn/xsmt-{draw_date:%d-%m-%Y}.html'
-    station = (
-        _extracted()
-        .result.stations[0]
-        .model_copy(
+    base_stations = _extracted().result.stations
+    stations = tuple(
+        base_stations[index % len(base_stations)].model_copy(
             update={
                 'draw_date': draw_date,
                 'station_code': station_code,
                 'station_name': station_code,
+                'station_url': f'https://xoso.com.vn/xs{station_code.lower()}-p1.html',
                 'source_url': source_url,
             }
         )
+        for index, station_code in enumerate(station_codes)
     )
-    return CentralDailyResult(draw_date=draw_date, source_url=source_url, stations=(station,))
+    return CentralDailyResult(draw_date=draw_date, source_url=source_url, stations=stations)
 
 
 def _station_count_check(results: list[CentralDailyResult]):
@@ -71,12 +76,12 @@ def test_central_extractor_uses_xsmt_source_profiles() -> None:
     assert extractor.build_fallback_source_url(TARGET_DATE) == 'https://xskt.com.vn/xsmt/ngay-18-7-2026'
 
 
-def test_parse_central_page_extracts_two_complete_stations() -> None:
+def test_parse_central_page_extracts_three_complete_stations() -> None:
     result = _extracted().result
 
     assert result.draw_date == TARGET_DATE
-    assert [station.station_code for station in result.stations] == ['DNA', 'QNG']
-    assert [len(station.prizes) for station in result.stations] == [18, 18]
+    assert [station.station_code for station in result.stations] == ['DNA', 'QNG', 'DNO']
+    assert [len(station.prizes) for station in result.stations] == [18, 18, 18]
     assert result.stations[0].prizes[-1].formatted_number == '874942'
 
     with pytest.raises(RequestedDateMismatchError):
@@ -87,7 +92,7 @@ def test_parse_central_page_extracts_two_complete_stations() -> None:
         )
 
 
-def test_central_transform_and_quality_use_two_or_three_station_rule() -> None:
+def test_central_transform_and_quality_use_exact_station_calendar() -> None:
     result = _extracted().result
     draw = central_draw_results_frame([result], 'run-xsmt')
     loto = central_loto_daily_frame(draw, run_id='run-xsmt')
@@ -102,9 +107,9 @@ def test_central_transform_and_quality_use_two_or_three_station_rule() -> None:
     )
 
     require_quality(report)
-    assert draw.shape == (36, 15)
-    assert loto.shape == (200, 13)
-    assert gold['dim-station'].shape[0] == 2
+    assert draw.shape == (54, 15)
+    assert loto.shape == (300, 13)
+    assert gold['dim-station'].shape[0] == 3
     assert next(check for check in report.checks if check.name == 'station-count-per-day').passed
 
 
@@ -114,6 +119,8 @@ def test_central_quality_accepts_only_documented_2021_partial_draws() -> None:
         _one_station_result(date(2021, 8, 3), 'QNA'),
         _one_station_result(date(2021, 8, 6), 'GL'),
         _one_station_result(date(2021, 8, 18), 'KH'),
+        _station_set_result(date(2021, 8, 21), 'DNO', 'QNG'),
+        _station_set_result(date(2021, 9, 4), 'DNA', 'DNO'),
     ]
 
     check = _station_count_check(results)
@@ -124,6 +131,8 @@ def test_central_quality_accepts_only_documented_2021_partial_draws() -> None:
         '2021-08-03',
         '2021-08-06',
         '2021-08-18',
+        '2021-08-21',
+        '2021-09-04',
     ]
 
 
@@ -139,6 +148,21 @@ def test_central_quality_rejects_undocumented_or_wrong_single_station(
     station_code: str,
 ) -> None:
     assert not _station_count_check([_one_station_result(draw_date, station_code)]).passed
+
+
+def test_central_quality_rejects_wrong_station_set_with_the_right_count() -> None:
+    result = _station_set_result(TARGET_DATE, 'DNA', 'QNG', 'KH')
+
+    check = _station_count_check([result])
+
+    assert not check.passed
+    assert check.details['station_set_mismatches'] == [
+        {
+            'draw_date': TARGET_DATE.isoformat(),
+            'expected': ['DNA', 'DNO', 'QNG'],
+            'actual': ['DNA', 'KH', 'QNG'],
+        }
+    ]
 
 
 def test_central_pipeline_publishes_an_independent_manifest(tmp_path) -> None:

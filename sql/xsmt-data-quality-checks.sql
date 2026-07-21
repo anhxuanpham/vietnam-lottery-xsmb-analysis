@@ -22,29 +22,36 @@ FROM read_parquet('gold/latest/fact-draw-result.parquet')
 GROUP BY draw_date, station_code, prize_group, prize_order
 HAVING COUNT(*) > 1;
 
--- Must return no rows: source dates outside the normal two/three-station rule
--- or the exact documented partial-draw station set during the 2021 closures.
-WITH documented_partial_draws(draw_date, station_code) AS (
-    VALUES
-        (DATE '2021-07-27', 'QNA'),
-        (DATE '2021-08-03', 'QNA'),
-        (DATE '2021-08-06', 'GL'),
-        (DATE '2021-08-18', 'KH')
-),
-actual AS (
+-- Must return no rows: station codes differ from the exact versioned XSMT calendar.
+WITH actual AS (
     SELECT
         draw_date,
-        COUNT(DISTINCT station_code) AS station_count,
-        MIN(station_code) AS single_station_code
+        string_agg(DISTINCT station_code, ',' ORDER BY station_code) AS actual_station_codes
     FROM read_parquet('gold/latest/fact-draw-result.parquet')
     GROUP BY draw_date
+),
+expected AS (
+    SELECT
+        draw_date,
+        CASE
+            WHEN draw_date IN (DATE '2021-07-27', DATE '2021-08-03') THEN 'QNA'
+            WHEN draw_date = DATE '2021-08-06' THEN 'GL'
+            WHEN draw_date = DATE '2021-08-18' THEN 'KH'
+            WHEN draw_date = DATE '2021-08-21' THEN 'DNO,QNG'
+            WHEN draw_date = DATE '2021-09-04' THEN 'DNA,DNO'
+            WHEN CAST(strftime(draw_date, '%w') AS INTEGER) = 0 AND draw_date < DATE '2022-01-02'
+                THEN 'KH,KT'
+            WHEN CAST(strftime(draw_date, '%w') AS INTEGER) = 0 THEN 'KH,KT,TTH'
+            WHEN CAST(strftime(draw_date, '%w') AS INTEGER) = 1 THEN 'PY,TTH'
+            WHEN CAST(strftime(draw_date, '%w') AS INTEGER) = 2 THEN 'DLK,QNA'
+            WHEN CAST(strftime(draw_date, '%w') AS INTEGER) = 3 THEN 'DNA,KH'
+            WHEN CAST(strftime(draw_date, '%w') AS INTEGER) = 4 THEN 'BDI,QB,QT'
+            WHEN CAST(strftime(draw_date, '%w') AS INTEGER) = 5 THEN 'GL,NT'
+            WHEN CAST(strftime(draw_date, '%w') AS INTEGER) = 6 THEN 'DNA,DNO,QNG'
+        END AS expected_station_codes
+    FROM actual
 )
-SELECT actual.draw_date, actual.station_count, actual.single_station_code
+SELECT actual.draw_date, expected.expected_station_codes, actual.actual_station_codes
 FROM actual
-LEFT JOIN documented_partial_draws USING (draw_date)
-WHERE
-    (documented_partial_draws.draw_date IS NULL AND actual.station_count NOT IN (2, 3))
-    OR (
-        documented_partial_draws.draw_date IS NOT NULL
-        AND (actual.station_count <> 1 OR actual.single_station_code <> documented_partial_draws.station_code)
-    );
+JOIN expected USING (draw_date)
+WHERE actual.actual_station_codes <> expected.expected_station_codes;

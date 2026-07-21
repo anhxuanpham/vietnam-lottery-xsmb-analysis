@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from xsmb_etl.config import EtlEnvironment, Settings
 from xsmb_etl.control import DrawStatus
 from xsmb_etl.extract import ExtractedResult, ResultExtractor, parse_result_page
+from xsmb_etl.history_audit import DEFAULT_START_DATES, HistoryAuditReport, audit_history
 from xsmb_etl.lake_status import LakeStatus, inspect_lake
 from xsmb_etl.logging_config import configure_logging
 from xsmb_etl.marts import build_gold_tables
@@ -39,6 +40,8 @@ from xsmb_etl.xsmt_quality import build_central_quality_report
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command == 'audit-history':
+        _validate_history_audit_range(parser, args)
     settings = Settings()
     configure_logging(settings.log_level)
 
@@ -97,6 +100,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         else:
             _print_status_text(statuses)
         return 0 if all(status.healthy for status in statuses) else 1
+    if args.command == 'audit-history':
+        regions = _regions(args.region)
+        reports = []
+        for region in regions:
+            repository = _repository_for_args(settings, args, region, multiple=len(regions) > 1)
+            try:
+                report = audit_history(repository, from_date=args.from_date, to_date=args.to_date)
+            except ValueError as exc:
+                if str(exc) != 'to_date must be on or after from_date':
+                    raise
+                parser.error('--to must be on or after --from')
+            reports.append(report)
+        if args.json:
+            _print_history_audit_json(reports)
+        else:
+            _print_history_audit_text(reports)
+        return 0 if all(report.healthy for report in reports) else 1
     if args.command == 'download-gold':
         regions = _regions(args.region)
         paths = []
@@ -161,6 +181,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_storage_options(status)
     status.add_argument('--json', action='store_true', help='emit machine-readable JSON')
+
+    audit_history_parser = subparsers.add_parser(
+        'audit-history',
+        help='audit historical Gold coverage and regional station schedules',
+    )
+    _add_storage_options(audit_history_parser)
+    audit_history_parser.add_argument('--from', dest='from_date', type=_date, help='first draw date to audit')
+    audit_history_parser.add_argument('--to', dest='to_date', type=_date, help='last draw date to audit')
+    audit_history_parser.add_argument('--json', action='store_true', help='emit machine-readable JSON')
 
     download = subparsers.add_parser('download-gold', help='download current Gold objects')
     _add_storage_options(download)
@@ -384,6 +413,17 @@ def _default_target_date(region: LotteryRegion) -> date:
     return now.date() if now.time() >= completed_at else now.date() - timedelta(days=1)
 
 
+def _validate_history_audit_range(parser: argparse.ArgumentParser, args) -> None:
+    for region in _regions(args.region):
+        effective_from = args.from_date or DEFAULT_START_DATES[region]
+        effective_to = args.to_date or _default_target_date(region)
+        if effective_to < effective_from:
+            parser.error(
+                f'--to must be on or after --from for {region.value} '
+                f'(resolved range: {effective_from} to {effective_to})'
+            )
+
+
 def _date(value: str) -> date:
     try:
         return date.fromisoformat(value)
@@ -435,3 +475,29 @@ def _print_status_text(statuses: list[LakeStatus]) -> None:
             print(f'  snapshot: {snapshot}')
         for issue in status.issues:
             print(f'  issue: {issue}')
+
+
+def _print_history_audit_json(reports: list[HistoryAuditReport]) -> None:
+    if len(reports) == 1:
+        print(reports[0].model_dump_json(indent=2))
+        return
+    print(_json_object({report.region.value: report.model_dump(mode='json') for report in reports}))
+
+
+def _print_history_audit_text(reports: list[HistoryAuditReport]) -> None:
+    for index, report in enumerate(reports):
+        if index:
+            print()
+        state = 'OK' if report.healthy else 'FINDINGS'
+        print(f'{report.region.value.upper()}  {state}')
+        print(f'  range: {report.from_date} to {report.to_date}')
+        print(
+            f'  publication: manifest={report.manifest_target_date}; latest-completed={report.latest_completed_date}; '
+            f'run={report.run_id}; dataset={report.dataset_version}'
+        )
+        print(f'  rows: fact={report.fact_row_count}; loto={report.loto_row_count}; stations={report.station_count}')
+        if report.status_counts:
+            statuses = '; '.join(f'{status}={count}' for status, count in sorted(report.status_counts.items()))
+            print(f'  statuses: {statuses}')
+        for issue in report.issues:
+            print(f'  {issue.severity.upper()} {issue.code}: {issue.message}')

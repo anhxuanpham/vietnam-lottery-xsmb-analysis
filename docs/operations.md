@@ -5,7 +5,7 @@ Every operation targets one independent lake with `--region xsmb`, `--region xsm
 ## Daily success
 
 1. The source page matches the requested date.
-2. XSMB contains 27 values; every XSMN/XSMT station contains 18 values. XSMN has three/four stations per page and XSMT normally has two/three. Four documented 2021 closure dates accept one exact drawing station only: `2021-07-27 QNA`, `2021-08-03 QNA`, `2021-08-06 GL`, and `2021-08-18 KH`; every other one-station page remains a critical failure.
+2. XSMB contains 27 values; every XSMN/XSMT station contains 18 values. XSMN and XSMT must match their exact weekday station calendars, not only the station count. XSMT Sunday uses `KH, KT` through 2021 and `KH, KT, TTH` from `2022-01-02`. Six exact source-observed partial sets are versioned for 2021: `2021-07-27 QNA`, `2021-08-03 QNA`, `2021-08-06 GL`, `2021-08-18 KH`, `2021-08-21 DNO/QNG`, and `2021-09-04 DNA/DNO`; arbitrary omissions remain a critical failure.
 3. Critical quality checks pass at the correct date/station grain.
 4. Bronze is written once; monthly Silver and all Gold latest objects are updated in that region's lake.
 5. A run manifest and snapshot manifest are written.
@@ -70,6 +70,21 @@ snapshot manifest, and matching size/SHA-256/content metadata for every publishe
 unpublished lake, missing manifest/object, or metadata mismatch, so the JSON form is suitable for a GitHub Actions
 health gate. `--storage local --output data/lake` checks local lakes; with `--region all`, the command resolves
 `data/lake/xsmb`, `data/lake/xsmn`, and `data/lake/xsmt` independently.
+
+- After a historical backfill, run the deeper read-only audit. Unlike `status`, this downloads the manifest-bound
+  Gold Parquet objects and scans the requested history:
+
+```bash
+uv run lottery-etl audit-history --storage r2 --region all
+uv run lottery-etl audit-history --storage r2 --region all --json
+uv run lottery-etl audit-history --storage r2 --region xsmt --from 2021-07-01 --to 2021-09-30
+```
+
+By default the range starts at XSMB `2005-10-01`, XSMN `2010-01-01`, or XSMT `2018-01-01`, and ends at the latest
+completed regional cutoff (16:35 XSMN, 17:35 XSMT, 18:35 XSMB, Vietnam time). The audit verifies exact manifest
+size/SHA-256 before parsing, calendar statuses, fact and loto business keys/cardinality, number formatting, station
+dimension coverage, and exact weekday station sets. It returns `0` only with no findings and `1` otherwise. Findings
+are evidence to investigate; the command never writes data or reclassifies an unexplained gap as `no_draw`.
 
 - Confirm the selected R2 bucket name before running a destructive `--force` operation.
 - Inspect that region's most recent run manifest and quality report.

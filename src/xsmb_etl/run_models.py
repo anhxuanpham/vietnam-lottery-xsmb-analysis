@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from xsmb_etl.storage import StoredObject
 
@@ -64,12 +64,34 @@ class RunManifest(BaseModel):
 class LatestManifest(BaseModel):
     model_config = ConfigDict(frozen=True)
 
+    schema_version: int = Field(default=1, ge=1)
     run_id: str
     region: LotteryRegion = LotteryRegion.XSMB
     dataset_version: str
     target_date: date
     published_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    release_prefix: str | None = None
     objects: tuple[DataObjectReference, ...]
+
+    @model_validator(mode='after')
+    def validate_publication_boundary(self) -> LatestManifest:
+        if self.dataset_version != self.run_id:
+            raise ValueError('dataset_version must equal run_id')
+        if not self.objects:
+            raise ValueError('latest manifest must reference at least one Gold object')
+        keys = [reference.key for reference in self.objects]
+        if len(keys) != len(set(keys)):
+            raise ValueError('latest manifest must not contain duplicate object keys')
+        if self.schema_version == 1:
+            if self.release_prefix is not None or any(not key.startswith('gold/latest/') for key in keys):
+                raise ValueError('schema v1 latest manifest must reference only gold/latest objects')
+            return self
+        if self.schema_version == 2:
+            expected_prefix = f'gold/releases/run-id={self.run_id}/'
+            if self.release_prefix != expected_prefix or any(not key.startswith(expected_prefix) for key in keys):
+                raise ValueError('schema v2 latest manifest must reference its exact immutable release prefix')
+            return self
+        raise ValueError(f'unsupported latest manifest schema_version: {self.schema_version}')
 
 
 class PipelineRunResult(BaseModel):

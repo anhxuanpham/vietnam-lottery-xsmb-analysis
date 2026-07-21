@@ -1,16 +1,31 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  ANALYTICS_MODEL_VERSION,
+  BASELINE_COVERAGE,
+  backtest,
+  frequencies,
+  gaps,
+  pickNumbers,
+  type ModelKind,
+} from "@/analytics";
+import {
+  fetchPreferredDashboard,
+  fetchStationHistory,
+  type DashboardLoad,
+  type DashboardMetadata,
+  type ServingMode,
+} from "@/dashboard-data";
 import {
   LOTTERY_REGIONS,
-  normalizeLotteryDashboardData,
+  isLotteryRegion,
+  normalizeLotteryV2ResultsPage,
   regionName,
   type LotteryDashboardData,
   type LotteryDraw,
   type LotteryRegion,
 } from "@/lottery-contract";
-
-type ModelKind = "frequency" | "gap" | "balanced";
 
 type ModelResult = {
   kind: ModelKind;
@@ -20,6 +35,7 @@ type ModelResult = {
   picks: string[];
   coverage: number;
   lift: number;
+  evaluationCount: number;
 };
 
 const WINDOW_OPTIONS = [30, 90, 180, 365] as const;
@@ -30,78 +46,17 @@ const percentFormatter = new Intl.NumberFormat("vi-VN", {
   maximumFractionDigits: 1,
 });
 
-function frequencies(draws: LotteryDraw[]) {
-  const counts = Object.fromEntries(
-    Array.from({ length: 100 }, (_, index) => [String(index).padStart(2, "0"), 0]),
-  ) as Record<string, number>;
-
-  for (const draw of draws) {
-    for (const number of draw.numbers) counts[number] += 1;
-  }
-  return counts;
-}
-
-function gaps(draws: LotteryDraw[]) {
-  const latestIndex = draws.length - 1;
-  const lastSeen = Object.fromEntries(
-    Array.from({ length: 100 }, (_, index) => [String(index).padStart(2, "0"), -1]),
-  ) as Record<string, number>;
-
-  draws.forEach((draw, index) => {
-    for (const number of new Set(draw.numbers)) lastSeen[number] = index;
-  });
-
-  return Object.fromEntries(
-    Object.entries(lastSeen).map(([number, index]) => [
-      number,
-      index < 0 ? draws.length : latestIndex - index,
-    ]),
-  ) as Record<string, number>;
-}
-
-function pickNumbers(draws: LotteryDraw[], kind: ModelKind) {
-  const counts = frequencies(draws);
-  const drawGaps = gaps(draws);
-  const maxFrequency = Math.max(...Object.values(counts), 1);
-  const maxGap = Math.max(...Object.values(drawGaps), 1);
-
-  return Object.keys(counts)
-    .map((number) => {
-      const frequencyScore = counts[number] / maxFrequency;
-      const gapScore = drawGaps[number] / maxGap;
-      const score =
-        kind === "frequency"
-          ? frequencyScore
-          : kind === "gap"
-            ? gapScore
-            : frequencyScore * 0.6 + gapScore * 0.4;
-      return { number, score, frequency: counts[number], gap: drawGaps[number] };
-    })
-    .sort((a, b) => b.score - a.score || b.frequency - a.frequency || a.number.localeCompare(b.number))
-    .slice(0, 10)
-    .map((item) => item.number);
-}
-
-function backtest(draws: LotteryDraw[], window: number, kind: ModelKind) {
-  const evaluationCount = Math.min(90, draws.length - Math.max(window, 30));
-  if (evaluationCount <= 0) return { coverage: 0, lift: 0 };
-
-  const startIndex = draws.length - evaluationCount;
-  let coveredResults = 0;
-  let totalResults = 0;
-
-  for (let index = startIndex; index < draws.length; index += 1) {
-    const training = draws.slice(Math.max(0, index - window), index);
-    const picks = new Set(pickNumbers(training, kind));
-    for (const number of draws[index].numbers) {
-      if (picks.has(number)) coveredResults += 1;
-      totalResults += 1;
-    }
-  }
-
-  const coverage = totalResults ? coveredResults / totalResults : 0;
-  return { coverage, lift: coverage / 0.1 };
-}
+const PRIZE_NAMES: Record<string, string> = {
+  special: "Đặc biệt",
+  first: "Giải nhất",
+  second: "Giải nhì",
+  third: "Giải ba",
+  fourth: "Giải tư",
+  fifth: "Giải năm",
+  sixth: "Giải sáu",
+  seventh: "Giải bảy",
+  eighth: "Giải tám",
+};
 
 function formatDate(value: string) {
   return new Intl.DateTimeFormat("vi-VN", {
@@ -120,49 +75,112 @@ function DashboardLoading() {
   );
 }
 
+function initialSearchParameter(name: string): string {
+  return typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get(name) ?? "";
+}
+
 export default function Home() {
-  const [region, setRegion] = useState<LotteryRegion>("xsmb");
-  const [data, setData] = useState<LotteryDashboardData | null>(null);
+  const [region, setRegion] = useState<LotteryRegion>(() => {
+    const value = initialSearchParameter("region");
+    return isLotteryRegion(value) ? value : "xsmb";
+  });
+  const [data, setData] = useState<DashboardMetadata | null>(null);
+  const [fallbackData, setFallbackData] = useState<LotteryDashboardData | null>(null);
+  const [servingMode, setServingMode] = useState<ServingMode>("v2");
+  const [draws, setDraws] = useState<LotteryDraw[]>([]);
   const [error, setError] = useState("");
+  const [historyError, setHistoryError] = useState("");
   const [dataSource, setDataSource] = useState("");
-  const [selectedStation, setSelectedStation] = useState("xsmb");
+  const [selectedStation, setSelectedStation] = useState("");
+  const requestedStation = useRef(initialSearchParameter("station"));
   const [selectedWindow, setSelectedWindow] = useState(90);
   const [activeWindow, setActiveWindow] = useState(90);
   const [lastRun, setLastRun] = useState("Chưa chạy");
+  const [reloadToken, setReloadToken] = useState(0);
+  const [explorerFrom, setExplorerFrom] = useState(() => initialSearchParameter("from"));
+  const [explorerTo, setExplorerTo] = useState(() => initialSearchParameter("to"));
+  const [explorerNumber, setExplorerNumber] = useState(() => initialSearchParameter("number"));
+  const [explorerItems, setExplorerItems] = useState<LotteryDraw[]>([]);
+  const [explorerCursor, setExplorerCursor] = useState<string | null>(null);
+  const [explorerLoading, setExplorerLoading] = useState(false);
+  const [explorerError, setExplorerError] = useState("");
+  const explorerAbortController = useRef<AbortController | null>(null);
+
+  useEffect(() => () => explorerAbortController.current?.abort(), []);
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`/api/lottery?region=${region}`, { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const payload: unknown = await response.json();
-        const normalized = normalizeLotteryDashboardData(payload, region);
-        if (!normalized) throw new Error("Invalid dashboard payload");
-        setDataSource(response.headers.get("x-lottery-source") ?? "api");
-        return normalized;
-      })
-      .then((nextData) => {
-        setData(nextData);
-        setSelectedStation(nextData.stations[0]?.code ?? "");
-        setSelectedWindow(90);
-        setActiveWindow(90);
-        setLastRun("Chưa chạy");
-      })
-      .catch((reason: unknown) => {
-        if (reason instanceof DOMException && reason.name === "AbortError") return;
-        setError(`Không thể nạp dữ liệu ${region.toUpperCase()} từ API.`);
-      });
+
+    const load = async () => {
+      const loaded = await fetchPreferredDashboard(region, { signal: controller.signal });
+      setError("");
+      setHistoryError("");
+      setData(loaded.data);
+      setFallbackData(loaded.fallbackData);
+      setServingMode(loaded.servingMode);
+      setDataSource(loaded.dataSource);
+      const station = loaded.data.stations.some((item) => item.code === requestedStation.current)
+        ? requestedStation.current
+        : loaded.data.stations[0]?.code ?? "";
+      setSelectedStation(station);
+    };
+
+    load().catch((reason: unknown) => {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      setError(`Không thể nạp dữ liệu ${region.toUpperCase()} từ API.`);
+    });
     return () => controller.abort();
-  }, [region]);
+  }, [region, reloadToken]);
+
+  useEffect(() => {
+    if (!data || !selectedStation) return;
+    const controller = new AbortController();
+
+    const loadHistory = async () => {
+      const dashboard: DashboardLoad = {
+        data,
+        fallbackData,
+        servingMode,
+        dataSource,
+      };
+      const loaded = await fetchStationHistory(dashboard, region, selectedStation, {
+        signal: controller.signal,
+      });
+      if (loaded.fallback) {
+        setData(loaded.fallback.data);
+        setFallbackData(loaded.fallback.fallbackData);
+        setServingMode(loaded.fallback.servingMode);
+        setDataSource(loaded.fallback.dataSource);
+      }
+      if (loaded.station !== selectedStation) setSelectedStation(loaded.station);
+      setDraws(loaded.draws);
+      setHistoryError("");
+    };
+    loadHistory().catch((reason: unknown) => {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      setHistoryError(`Không thể nạp lịch sử của đài ${selectedStation}.`);
+    });
+    return () => controller.abort();
+  }, [data, dataSource, fallbackData, region, selectedStation, servingMode]);
+
+  useEffect(() => {
+    if (!selectedStation) return;
+    const parameters = new URLSearchParams();
+    parameters.set("region", region);
+    parameters.set("station", selectedStation);
+    if (explorerFrom) parameters.set("from", explorerFrom);
+    if (explorerTo) parameters.set("to", explorerTo);
+    if (explorerNumber) parameters.set("number", explorerNumber);
+    window.history.replaceState(null, "", `${window.location.pathname}?${parameters}${window.location.hash}`);
+  }, [explorerFrom, explorerNumber, explorerTo, region, selectedStation]);
 
   const analysis = useMemo(() => {
-    if (!data) return null;
+    if (!data || draws.length === 0) return null;
     const station = data.stations.find((item) => item.code === selectedStation) ?? data.stations[0];
     if (!station) return null;
-    const filteredDraws = data.draws.filter((draw) => draw.stationCode === station.code);
-    const analysisDraws = filteredDraws.slice(-activeWindow);
+    const analysisDraws = draws.slice(-activeWindow);
     const counts = frequencies(analysisDraws);
-    const drawGaps = gaps(filteredDraws);
+    const drawGaps = gaps(draws);
     const sortedFrequency = Object.entries(counts).sort(
       ([numberA, countA], [numberB, countB]) => countB - countA || numberA.localeCompare(numberB),
     );
@@ -188,53 +206,112 @@ export default function Home() {
       },
     ];
     const models: ModelResult[] = modelDefinitions.map((model) => {
-      const result = backtest(filteredDraws, activeWindow, model.kind);
+      const result = backtest(draws, activeWindow, model.kind);
       return {
         ...model,
         picks: pickNumbers(analysisDraws, model.kind),
         coverage: result.coverage,
         lift: result.lift,
+        evaluationCount: result.evaluationCount,
       };
     });
 
-    const recentSeven = frequencies(filteredDraws.slice(-7));
-    const priorThirty = frequencies(filteredDraws.slice(-37, -7));
+    const recentSeven = frequencies(draws.slice(-7));
+    const priorThirty = frequencies(draws.slice(-37, -7));
     const momentum = Object.keys(counts)
       .map((number) => ({
         number,
         score: recentSeven[number] / 7 - priorThirty[number] / 30,
       }))
-      .sort((a, b) => b.score - a.score || a.number.localeCompare(b.number))
+      .sort((left, right) => right.score - left.score || left.number.localeCompare(right.number))
       .slice(0, 5);
 
     return {
       analysisDraws,
-      filteredDraws,
+      filteredDraws: draws,
       station,
-      evaluationCount: Math.max(0, Math.min(90, filteredDraws.length - Math.max(activeWindow, 30))),
+      evaluationCount: models[0]?.evaluationCount ?? 0,
       counts,
       drawGaps,
       maxFrequency,
       hot: sortedFrequency.slice(0, 5),
-      cold: [...sortedFrequency].sort(
-        ([numberA, countA], [numberB, countB]) => countA - countB || numberA.localeCompare(numberB),
-      ).slice(0, 5),
+      cold: [...sortedFrequency]
+        .sort(([numberA, countA], [numberB, countB]) => countA - countB || numberA.localeCompare(numberB))
+        .slice(0, 5),
       momentum,
       models,
     };
-  }, [activeWindow, data, selectedStation]);
+  }, [activeWindow, data, draws, selectedStation]);
+
+  const runExplorer = async (cursor: string | null = null) => {
+    if (!data || !selectedStation) return;
+    if ((explorerFrom && explorerTo && explorerTo < explorerFrom) ||
+      (explorerNumber && !/^\d{2}$/.test(explorerNumber))) {
+      setExplorerError("Khoảng ngày hoặc đuôi loto không hợp lệ.");
+      return;
+    }
+    explorerAbortController.current?.abort();
+    const controller = new AbortController();
+    explorerAbortController.current = controller;
+    setExplorerLoading(true);
+    setExplorerError("");
+    try {
+      if (servingMode === "v1") {
+        const matches = (fallbackData?.draws ?? [])
+          .filter((draw) => draw.stationCode === selectedStation)
+          .filter((draw) => !explorerFrom || draw.date >= explorerFrom)
+          .filter((draw) => !explorerTo || draw.date <= explorerTo)
+          .filter((draw) => !explorerNumber || draw.numbers.includes(explorerNumber))
+          .sort((left, right) => right.date.localeCompare(left.date))
+          .slice(0, 25);
+        setExplorerItems(matches);
+        setExplorerCursor(null);
+        return;
+      }
+      const parameters = new URLSearchParams({ region, station: selectedStation, limit: "25" });
+      if (explorerFrom) parameters.set("from", explorerFrom);
+      if (explorerTo) parameters.set("to", explorerTo);
+      if (explorerNumber) parameters.set("number", explorerNumber);
+      if (cursor) parameters.set("cursor", cursor);
+      const response = await fetch(`/api/v2/results?${parameters}`, { signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const payload: unknown = await response.json();
+      const page = normalizeLotteryV2ResultsPage(payload, region);
+      if (!page || page.releaseId !== data.manifest.datasetVersion) throw new Error("Invalid result page");
+      setExplorerItems(page.items);
+      setExplorerCursor(page.page.nextCursor);
+    } catch (reason: unknown) {
+      if (reason instanceof DOMException && reason.name === "AbortError") return;
+      setExplorerError("Không thể tra cứu. Kiểm tra khoảng ngày và thử lại.");
+    } finally {
+      if (explorerAbortController.current === controller) {
+        explorerAbortController.current = null;
+        setExplorerLoading(false);
+      }
+    }
+  };
 
   if (error) {
     return (
       <main className="loading-shell error-shell">
         <div className="loading-mark">!</div>
         <p>{error}</p>
+        <button type="button" onClick={() => setReloadToken((value) => value + 1)}>Thử lại</button>
       </main>
     );
   }
-  if (!data || !analysis) return <DashboardLoading />;
+  if (!data || (!analysis && !historyError)) return <DashboardLoading />;
+  if (historyError || !analysis) {
+    return (
+      <main className="loading-shell error-shell">
+        <div className="loading-mark">!</div>
+        <p>{historyError || "Không đủ lịch sử để phân tích."}</p>
+        <button type="button" onClick={() => setReloadToken((value) => value + 1)}>Thử lại</button>
+      </main>
+    );
+  }
 
-  const latestDraw = analysis.filteredDraws.at(-1) ?? data.draws.at(-1);
+  const latestDraw = analysis.filteredDraws.at(-1);
   if (!latestDraw) return <DashboardLoading />;
 
   const runModels = () => {
@@ -248,10 +325,35 @@ export default function Home() {
 
   const chooseRegion = (nextRegion: LotteryRegion) => {
     if (nextRegion === region) return;
-    setData(null);
-    setError("");
+    explorerAbortController.current?.abort();
+    explorerAbortController.current = null;
+    setExplorerLoading(false);
+    requestedStation.current = "";
+    setExplorerFrom("");
+    setExplorerTo("");
+    setExplorerNumber("");
     setSelectedStation("");
+    setData(null);
+    setFallbackData(null);
+    setDraws([]);
+    setExplorerItems([]);
+    setExplorerCursor(null);
+    setError("");
+    setHistoryError("");
     setRegion(nextRegion);
+  };
+
+  const chooseStation = (station: string) => {
+    explorerAbortController.current?.abort();
+    explorerAbortController.current = null;
+    setExplorerLoading(false);
+    requestedStation.current = station;
+    setSelectedStation(station);
+    setDraws([]);
+    setExplorerItems([]);
+    setExplorerCursor(null);
+    setExplorerError("");
+    setHistoryError("");
   };
 
   return (
@@ -266,12 +368,25 @@ export default function Home() {
         </a>
         <nav aria-label="Điều hướng chính">
           <a href="#overview">Tổng quan</a>
+          <a href="#explorer">Tra cứu</a>
           <a href="#models">Mô hình</a>
           <a href="#heatmap">Heatmap</a>
           <a href="#health">Dữ liệu</a>
         </nav>
         <div className="live-badge"><span /> {dataSource === "r2" ? "R2 live" : "Demo local"}</div>
       </header>
+
+      {(servingMode === "v1" || dataSource !== "r2") && (
+        <aside className="degraded-banner" role="status">
+          <strong>Chế độ tương thích</strong>
+          <span>
+            {dataSource === "bundled-demo"
+              ? "R2 chưa sẵn sàng; dashboard đang dùng snapshot demo và phạm vi tra cứu bị giới hạn."
+              : "Serving API v2 chưa sẵn sàng; dashboard đang đọc payload v1 gần nhất."}
+          </span>
+          <button type="button" onClick={() => setReloadToken((value) => value + 1)}>Thử lại v2</button>
+        </aside>
+      )}
 
       <section className="hero" id="overview">
         <div className="hero-copy">
@@ -312,6 +427,93 @@ export default function Home() {
         <article><span>04</span><small>Backtest gần nhất</small><strong>{analysis.evaluationCount} kỳ</strong><p>Walk-forward · baseline 10%</p></article>
       </section>
 
+      <section className="result-explorer" id="explorer">
+        <div className="section-heading">
+          <div><p className="kicker">RESULT EXPLORER</p><h2>Tra cứu từng kỳ quay</h2></div>
+          <p>Lọc đúng đài, ngày và đuôi 00–99. Kết quả giữ nguyên từng nhóm giải và mọi số 0 ở đầu.</p>
+        </div>
+        <form
+          className="explorer-controls"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void runExplorer();
+          }}
+        >
+          <label>
+            Đài
+            <select value={selectedStation} onChange={(event) => chooseStation(event.target.value)}>
+              {data.stations.map((station) => (
+                <option key={station.code} value={station.code}>{station.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Từ ngày
+            <input type="date" value={explorerFrom} onChange={(event) => setExplorerFrom(event.target.value)} />
+          </label>
+          <label>
+            Đến ngày
+            <input type="date" value={explorerTo} onChange={(event) => setExplorerTo(event.target.value)} />
+          </label>
+          <label>
+            Đuôi loto
+            <input
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]{2}"
+              maxLength={2}
+              placeholder="00–99"
+              value={explorerNumber}
+              onChange={(event) => setExplorerNumber(event.target.value.replace(/\D/g, "").slice(0, 2))}
+            />
+          </label>
+          <button type="submit" disabled={explorerLoading}>
+            {explorerLoading ? "Đang tra…" : "Tra kết quả"}
+          </button>
+        </form>
+        {explorerError && <p className="explorer-message error" role="alert">{explorerError}</p>}
+        {!explorerError && explorerItems.length === 0 && (
+          <p className="explorer-message">Chọn bộ lọc rồi bấm “Tra kết quả”. Đặt hai ngày giống nhau để tra đúng một kỳ.</p>
+        )}
+        <div className="result-list" aria-live="polite">
+          {explorerItems.map((draw) => (
+            <article className="result-card" key={`${draw.stationCode}-${draw.date}`}>
+              <header>
+                <div><small>{draw.stationName}</small><h3>{formatDate(draw.date)}</h3></div>
+                <div className="result-special"><small>Đặc biệt</small><strong>{draw.specialPrize}</strong></div>
+              </header>
+              <div className="prize-table">
+                {Object.entries(draw.prizes).map(([group, prizes]) => (
+                  <div className={group === "special" ? "prize-row special" : "prize-row"} key={group}>
+                    <span>{PRIZE_NAMES[group] ?? group}</span>
+                    <div>
+                      {prizes.map((prize, index) => (
+                        <strong
+                          className={explorerNumber && prize.endsWith(explorerNumber) ? "matched" : ""}
+                          key={`${prize}-${index}`}
+                        >
+                          {prize}
+                        </strong>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+        {explorerCursor && (
+          <button
+            className="next-page"
+            type="button"
+            disabled={explorerLoading}
+            onClick={() => void runExplorer(explorerCursor)}
+          >
+            Trang tiếp theo →
+          </button>
+        )}
+      </section>
+
       <section className="model-lab" id="models">
         <div className="section-heading">
           <div><p className="kicker">MODEL LAB</p><h2>Chạy thử các góc nhìn</h2></div>
@@ -335,7 +537,7 @@ export default function Home() {
           {data.stations.length > 1 && (
             <label>
               Đài phân tích
-              <select value={selectedStation} onChange={(event) => setSelectedStation(event.target.value)}>
+              <select value={selectedStation} onChange={(event) => chooseStation(event.target.value)}>
                 {data.stations.map((station) => (
                   <option key={station.code} value={station.code}>{station.name}</option>
                 ))}
@@ -368,10 +570,11 @@ export default function Home() {
                 <div><small>Coverage</small><strong>{percentFormatter.format(model.coverage)}</strong></div>
                 <div><small>Lift / baseline</small><strong>{model.lift.toFixed(2)}×</strong></div>
               </div>
+              <p className="model-sample">{model.evaluationCount} kỳ đánh giá · không nhìn trước</p>
             </article>
           ))}
         </div>
-        <p className="model-warning"><strong>Lưu ý:</strong> Các model trên là heuristic mô tả và backtest, không phải dự báo xác suất trúng hay khuyến nghị đặt cược.</p>
+        <p className="model-warning"><strong>{ANALYTICS_MODEL_VERSION}</strong> · baseline {percentFormatter.format(BASELINE_COVERAGE)}. Các model là heuristic mô tả và backtest, không phải dự báo xác suất trúng hay khuyến nghị đặt cược.</p>
       </section>
 
       <section className="analysis-grid" id="heatmap">

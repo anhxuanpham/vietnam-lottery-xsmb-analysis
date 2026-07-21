@@ -35,6 +35,7 @@ class Pipeline:
         self.source_lineage = source_lineage
 
     def run(self, target_date: date, *, force: bool = False) -> PipelineRunResult:
+        self.repository.require_etl_writable()
         control_state = self.repository.control_state()
         if not control_state.should_process(target_date, force=force):
             status = control_state.status_for(target_date)
@@ -51,6 +52,7 @@ class Pipeline:
         started_at = datetime.now(UTC)
         objects: list[StoredObject] = []
         quality_passed = False
+        publication_committed = False
         try:
             if self.repository.bronze_complete(target_date) and not force:
                 extracted = self.repository.load_bronze(target_date)
@@ -83,7 +85,10 @@ class Pipeline:
             objects.extend(self.repository.upsert_silver_draw_results(current_draw))
             all_draw = self.repository.read_all_silver_draw_results()
             all_loto = loto_daily_frame(all_draw, run_id=run_id)
-            objects.extend(self.repository.replace_silver_loto_daily(all_loto))
+            current_loto_with_history = all_loto.loc[all_loto['draw_date'].dt.date == target_date].reset_index(
+                drop=True
+            )
+            objects.extend(self.repository.upsert_silver_loto_daily(current_loto_with_history))
 
             minimum_date = all_draw['draw_date'].min().date()
             maximum_date = all_draw['draw_date'].max().date()
@@ -102,7 +107,7 @@ class Pipeline:
             require_quality(report)
             quality_passed = True
             objects.append(self.repository.write_quality_report(report, target_date))
-            gold_objects = self.repository.write_gold_tables(gold_tables, run_id=run_id)
+            gold_objects = self.repository.write_gold_tables(gold_tables, run_id=run_id, formats=('parquet',))
             objects.extend(gold_objects)
 
             success_manifest = RunManifest(
@@ -117,13 +122,16 @@ class Pipeline:
                 covered_dates=(target_date,),
                 objects=tuple(DataObjectReference.from_stored(item) for item in objects),
             )
-            objects.append(self.repository.write_run_manifest(success_manifest))
+            objects.append(self.repository.write_run_manifest(success_manifest, update_control=False))
             snapshot, latest = self.repository.publish_snapshot_and_latest(
                 run_id=run_id,
                 target_date=target_date,
                 gold_objects=gold_objects,
+                published_at=success_manifest.completed_at,
             )
             objects.extend([snapshot, latest])
+            publication_committed = True
+            self.repository.publish_manifest_control_state(success_manifest)
             return PipelineRunResult(
                 run_id=run_id,
                 region=self.repository.region,
@@ -155,6 +163,8 @@ class Pipeline:
                 message=exc.notice,
             )
         except Exception as exc:
+            if publication_committed:
+                raise
             failure_manifest = RunManifest(
                 run_id=run_id,
                 region=self.repository.region,
@@ -176,6 +186,7 @@ class Pipeline:
             raise
 
     def backfill(self, start_date: date, end_date: date, *, force: bool = False) -> list[PipelineRunResult]:
+        self.repository.require_etl_writable()
         control_state = self.repository.control_state()
         pending = control_state.pending_dates(start_date, end_date, force=force)
         results: list[PipelineRunResult] = []
@@ -298,6 +309,7 @@ class Pipeline:
             raise
 
     def record_no_draw(self, target_date: date, *, detail: str) -> PipelineRunResult:
+        self.repository.require_etl_writable()
         run_id = str(uuid4())
         now = datetime.now(UTC)
         manifest = RunManifest(
@@ -320,9 +332,11 @@ class Pipeline:
         )
 
     def build_gold(self) -> PipelineRunResult:
+        self.repository.require_etl_writable()
         run_id = str(uuid4())
         started_at = datetime.now(UTC)
         objects: list[StoredObject] = []
+        publication_committed = False
         all_draw = self.repository.read_all_silver_draw_results()
         if all_draw.empty:
             raise ValueError('no Silver draw results are available')
@@ -347,7 +361,7 @@ class Pipeline:
             require_quality(report)
             objects.extend(self.repository.replace_silver_loto_daily(all_loto))
             objects.append(self.repository.write_quality_report(report, target_date))
-            gold_objects = self.repository.write_gold_tables(gold_tables, run_id=run_id)
+            gold_objects = self.repository.write_gold_tables(gold_tables, run_id=run_id, formats=('parquet',))
             objects.extend(gold_objects)
             manifest = RunManifest(
                 run_id=run_id,
@@ -360,13 +374,16 @@ class Pipeline:
                 covered_dates=tuple(result.draw_date for result in canonical),
                 objects=tuple(DataObjectReference.from_stored(item) for item in objects),
             )
-            objects.append(self.repository.write_run_manifest(manifest))
+            objects.append(self.repository.write_run_manifest(manifest, update_control=False))
             snapshot, latest = self.repository.publish_snapshot_and_latest(
                 run_id=run_id,
                 target_date=target_date,
                 gold_objects=gold_objects,
+                published_at=manifest.completed_at,
             )
             objects.extend([snapshot, latest])
+            publication_committed = True
+            self.repository.publish_manifest_control_state(manifest)
             return PipelineRunResult(
                 run_id=run_id,
                 target_date=target_date,
@@ -375,6 +392,8 @@ class Pipeline:
                 message=f'rebuilt Gold dataset version {run_id}',
             )
         except Exception as exc:
+            if publication_committed:
+                raise
             failure = RunManifest(
                 run_id=run_id,
                 target_date=target_date,

@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     r2_bucket_name: str = 'xsmb-data-lake'
     r2_xsmn_bucket_name: str = 'xsmn-data-lake'
     r2_xsmt_bucket_name: str = 'xsmt-data-lake'
+    r2_backup_bucket_name: str | None = None
+    r2_backup_account_id: str | None = None
+    r2_backup_access_key_id: SecretStr | None = None
+    r2_backup_secret_access_key: SecretStr | None = None
+    r2_backup_endpoint_url: HttpUrl | None = None
     r2_endpoint_url: HttpUrl | None = None
     r2_xsmn_account_id: str | None = None
     r2_xsmn_access_key_id: SecretStr | None = None
@@ -97,6 +102,16 @@ class Settings(BaseSettings):
             return str(self.r2_xsmt_endpoint_url).rstrip('/')
         if self.r2_xsmt_account_id:
             return f'https://{self.r2_xsmt_account_id}.r2.cloudflarestorage.com'
+        return self.resolved_r2_endpoint_url
+
+    @property
+    def resolved_backup_r2_endpoint_url(self) -> str | None:
+        """Return a dedicated backup endpoint, or the primary endpoint as fallback."""
+
+        if self.r2_backup_endpoint_url is not None:
+            return str(self.r2_backup_endpoint_url).rstrip('/')
+        if self.r2_backup_account_id:
+            return f'https://{self.r2_backup_account_id}.r2.cloudflarestorage.com'
         return self.resolved_r2_endpoint_url
 
     @model_validator(mode='after')

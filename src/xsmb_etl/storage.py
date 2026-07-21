@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import fcntl
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from tempfile import NamedTemporaryFile
@@ -19,6 +20,10 @@ class ObjectAlreadyExistsError(ObjectStoreError):
     pass
 
 
+class ObjectPreconditionFailedError(ObjectStoreError):
+    pass
+
+
 class ObjectNotFoundError(ObjectStoreError):
     pass
 
@@ -30,6 +35,7 @@ class StoredObject:
     sha256: str
     content_type: str
     cache_control: str | None = None
+    etag: str | None = None
 
 
 class ObjectStore(Protocol):
@@ -42,6 +48,7 @@ class ObjectStore(Protocol):
         cache_control: str | None = None,
         metadata: dict[str, str] | None = None,
         overwrite: bool = True,
+        if_match: str | None = None,
     ) -> StoredObject: ...
 
     def get_bytes(self, key: str) -> bytes: ...
@@ -69,29 +76,41 @@ class LocalObjectStore:
         cache_control: str | None = None,
         metadata: dict[str, str] | None = None,
         overwrite: bool = True,
+        if_match: str | None = None,
     ) -> StoredObject:
         path = self._path_for(key)
-        if path.exists() and not overwrite:
-            raise ObjectAlreadyExistsError(f'object already exists: {key}')
-
-        digest = hashlib.sha256(data).hexdigest()
-        stored = StoredObject(
-            key=key,
-            size=len(data),
-            sha256=digest,
-            content_type=content_type,
-            cache_control=cache_control,
-        )
         path.parent.mkdir(parents=True, exist_ok=True)
-        self._atomic_write(path, data)
-        sidecar = {
-            **asdict(stored),
-            'metadata': {'sha256': digest, **(metadata or {})},
-        }
-        metadata_path = self._metadata_path_for(key)
-        metadata_path.parent.mkdir(parents=True, exist_ok=True)
-        self._atomic_write(metadata_path, json.dumps(sidecar, indent=2, sort_keys=True).encode('utf-8'))
-        return stored
+        if if_match is not None and not overwrite:
+            raise ValueError('if_match and overwrite=False are mutually exclusive')
+
+        lock_path = self.metadata_root / '.locks' / f'{hashlib.sha256(key.encode()).hexdigest()}.lock'
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open('a+b') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            if path.exists() and not overwrite:
+                raise ObjectAlreadyExistsError(f'object already exists: {key}')
+            if if_match is not None:
+                if not path.exists() or _etag(path.read_bytes()) != if_match:
+                    raise ObjectPreconditionFailedError(f'object precondition failed: {key}')
+
+            digest = hashlib.sha256(data).hexdigest()
+            stored = StoredObject(
+                key=key,
+                size=len(data),
+                sha256=digest,
+                content_type=content_type,
+                cache_control=cache_control,
+                etag=_etag(data),
+            )
+            self._atomic_write(path, data)
+            sidecar = {
+                **asdict(stored),
+                'metadata': {'sha256': digest, **(metadata or {})},
+            }
+            metadata_path = self._metadata_path_for(key)
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            self._atomic_write(metadata_path, json.dumps(sidecar, indent=2, sort_keys=True).encode('utf-8'))
+            return stored
 
     def get_bytes(self, key: str) -> bytes:
         path = self._path_for(key)
@@ -120,6 +139,7 @@ class LocalObjectStore:
                 sha256=sha256,
                 content_type=content_type,
                 cache_control=values.get('cache_control'),
+                etag=str(values.get('etag') or _etag(path.read_bytes())),
             )
         data = self.get_bytes(key)
         return StoredObject(
@@ -127,6 +147,7 @@ class LocalObjectStore:
             size=len(data),
             sha256=hashlib.sha256(data).hexdigest(),
             content_type=content_type_for_key(key),
+            etag=_etag(data),
         )
 
     def list_keys(self, prefix: str = '') -> list[str]:
@@ -175,3 +196,7 @@ def _normalize_key(key: str) -> str:
     if path.is_absolute() or '..' in path.parts or not path.parts:
         raise ObjectStoreError(f'invalid object key: {key}')
     return path.as_posix()
+
+
+def _etag(data: bytes) -> str:
+    return hashlib.md5(data, usedforsecurity=False).hexdigest()

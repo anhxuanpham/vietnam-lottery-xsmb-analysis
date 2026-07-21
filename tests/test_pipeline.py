@@ -10,7 +10,7 @@ from xsmb_etl.extract import ExtractedResult, NoDrawSourcePageError, SourcePageE
 from xsmb_etl.models import LotteryResult
 from xsmb_etl.pipeline import Pipeline, backfill_failure_result
 from xsmb_etl.repository import DataLakeRepository
-from xsmb_etl.run_models import LotteryRegion
+from xsmb_etl.run_models import LotteryRegion, RunManifest, RunStatus
 from xsmb_etl.storage import LocalObjectStore
 
 
@@ -55,7 +55,13 @@ def test_fixture_pipeline_publishes_latest_last_and_is_idempotent(
     second = pipeline.run(target_date)
 
     assert first.status == 'success'
-    assert store.writes[-1] == 'manifests/latest.json'
+    latest_index = store.writes.index('manifests/latest.json')
+    assert all(
+        index < latest_index
+        for index, key in enumerate(store.writes)
+        if key.startswith(('gold/releases/', 'gold/snapshots/'))
+    )
+    assert store.writes[-1] == 'control/latest.json'
     assert repository.latest_manifest().run_id == first.run_id
     assert second.skipped
     assert extractor.calls == 1
@@ -71,6 +77,95 @@ def test_failed_run_is_recorded_without_publishing_latest(tmp_path) -> None:
 
     assert repository.latest_manifest() is None
     assert repository.control_state().status_for(target_date).value == 'failed'
+
+
+def test_control_pointer_failure_after_latest_preserves_committed_success(
+    tmp_path,
+    valid_result_page: bytes,
+    grouped_prize_values: dict[str, list[str]],
+) -> None:
+    class PostPublishControlFailingStore(RecordingStore):
+        def put_bytes(self, key, data, **kwargs):
+            if key == 'control/latest.json' and 'manifests/latest.json' in self.writes:
+                raise RuntimeError('injected post-publication control failure')
+            return super().put_bytes(key, data, **kwargs)
+
+    target_date = date(2026, 7, 16)
+    result = LotteryResult.from_prize_groups(target_date, 'https://example.test', grouped_prize_values)
+    store = PostPublishControlFailingStore(tmp_path)
+    repository = DataLakeRepository(store, gold_cache_control='no-cache')
+    pipeline = Pipeline(repository, FixtureExtractor(ExtractedResult(valid_result_page, result)))
+
+    with pytest.raises(RuntimeError, match='post-publication control failure'):
+        pipeline.run(target_date)
+
+    latest = repository.latest_manifest()
+    assert latest is not None
+    run = RunManifest.model_validate_json(store.get_bytes(f'manifests/runs/run-id={latest.run_id}.json'))
+    assert run.status is RunStatus.SUCCESS
+    assert repository.control_state().status_for(target_date).value == 'missing'
+
+
+def test_lost_latest_put_response_is_reconciled_as_committed(
+    tmp_path,
+    valid_result_page: bytes,
+    grouped_prize_values: dict[str, list[str]],
+) -> None:
+    class LostResponseStore(RecordingStore):
+        def __init__(self, root) -> None:
+            super().__init__(root)
+            self.failed_once = False
+
+        def put_bytes(self, key, data, **kwargs):
+            stored = super().put_bytes(key, data, **kwargs)
+            if key == 'manifests/latest.json' and not self.failed_once:
+                self.failed_once = True
+                raise TimeoutError('response lost after commit')
+            return stored
+
+    target_date = date(2026, 7, 16)
+    result = LotteryResult.from_prize_groups(target_date, 'https://example.test', grouped_prize_values)
+    store = LostResponseStore(tmp_path)
+    repository = DataLakeRepository(store, gold_cache_control='no-cache')
+
+    pipeline_result = Pipeline(
+        repository,
+        FixtureExtractor(ExtractedResult(valid_result_page, result)),
+    ).run(target_date)
+
+    assert pipeline_result.status == 'success'
+    latest = repository.latest_manifest()
+    assert latest is not None
+    run = RunManifest.model_validate_json(store.get_bytes(f'manifests/runs/run-id={latest.run_id}.json'))
+    assert run.status is RunStatus.SUCCESS
+    assert repository.control_state().status_for(target_date).value == 'success'
+
+
+def test_daily_loto_persists_history_aware_recurrence_fields(
+    tmp_path,
+    valid_result_page: bytes,
+    grouped_prize_values: dict[str, list[str]],
+) -> None:
+    dates = (date(2026, 7, 15), date(2026, 7, 16))
+
+    class DateExtractor:
+        def extract(self, selected_date: date) -> ExtractedResult:
+            return ExtractedResult(
+                valid_result_page,
+                LotteryResult.from_prize_groups(selected_date, 'https://example.test', grouped_prize_values),
+            )
+
+    store = LocalObjectStore(tmp_path)
+    pipeline = Pipeline(DataLakeRepository(store, gold_cache_control='no-cache'), DateExtractor())
+    for target_date in dates:
+        pipeline.run(target_date)
+
+    key = next(key for key in store.list_keys('silver/loto-daily/') if key.endswith('loto-daily.parquet'))
+    loto = pd.read_parquet(BytesIO(store.get_bytes(key)))
+    current_63 = loto.loc[loto['draw_date'].eq(pd.Timestamp(dates[-1])) & loto['number_2d'].eq('63')].iloc[0]
+    assert current_63['previous_appearance_status'] == 'seen_before'
+    assert current_63['draws_since_previous'] == 1
+    assert current_63['rolling_7_frequency'] == 6
 
 
 def test_explicit_no_draw_is_recorded_and_skipped_on_repeat(tmp_path) -> None:
@@ -163,7 +258,12 @@ def test_backfill_republishes_gold_when_only_new_outcome_is_no_draw(
     assert [result.status for result in results] == ['no_draw']
     assert repository.latest_manifest().run_id != previous_run_id
     assert store.writes.count('manifests/latest.json') == 3
-    dim_date = pd.read_parquet(BytesIO(store.get_bytes('gold/latest/dim-date.parquet')))
+    dim_date_key = next(
+        reference.key
+        for reference in repository.latest_manifest().objects
+        if reference.key.endswith('/dim-date.parquet')
+    )
+    dim_date = pd.read_parquet(BytesIO(store.get_bytes(dim_date_key)))
     status = dim_date.loc[pd.to_datetime(dim_date['date']).dt.date.eq(no_draw_date), 'draw_status'].item()
     assert status == 'no_draw'
 
@@ -227,7 +327,12 @@ def test_backfill_recovers_no_draw_manifest_newer_than_gold_publication(
 
     assert results == []
     assert repository.latest_manifest().run_id != stale_run_id
-    dim_date = pd.read_parquet(BytesIO(store.get_bytes('gold/latest/dim-date.parquet')))
+    dim_date_key = next(
+        reference.key
+        for reference in repository.latest_manifest().objects
+        if reference.key.endswith('/dim-date.parquet')
+    )
+    dim_date = pd.read_parquet(BytesIO(store.get_bytes(dim_date_key)))
     status = dim_date.loc[pd.to_datetime(dim_date['date']).dt.date.eq(no_draw_date), 'draw_status'].item()
     assert status == 'no_draw'
 

@@ -1,4 +1,7 @@
-# XSMB ETL and Cloudflare R2 Data Lake Enhancement
+# Vietnam Lottery ETL and Cloudflare R2 Data Lake Enhancement
+
+This started as the XSMB implementation specification. The implemented platform now runs independent XSMB, XSMN,
+and XSMT lakes; current operational truth lives in `README.md` and `docs/operations.md`.
 
 ## 1. Document purpose
 
@@ -20,7 +23,7 @@ After implementation, the system must:
 1. Fetch the latest XSMB result from the configured source.
 2. Preserve the raw source response in an immutable Bronze layer.
 3. Validate and normalize the result into Silver Parquet datasets.
-4. Generate BI-friendly Gold datasets in both Parquet and CSV formats.
+4. Generate immutable BI-friendly Gold Parquet releases and separate manifest-addressed CSV exports.
 5. Upload all data layers to Cloudflare R2.
 6. Run automatically every day through GitHub Actions.
 7. Detect missing dates and retry gaps instead of relying only on the maximum stored date.
@@ -54,7 +57,8 @@ flowchart TD
     C --> D["Validate and normalize"]
     D --> E["Silver: typed Parquet datasets"]
     E --> F["Aggregate and enrich"]
-    F --> G["Gold: Parquet and CSV marts"]
+    F --> G["Gold: immutable Parquet releases"]
+    G --> K["Weekly manifest-addressed CSV exports"]
     G --> H["Python / DuckDB"]
     G --> I["Power BI"]
     G --> J["Tableau"]
@@ -64,7 +68,7 @@ Cloudflare R2 is an object store, not a relational database or SQL query engine.
 
 ## 5. R2 bucket layout
 
-Use one bucket initially:
+Each region owns an independent bucket. One representative regional layout is:
 
 ```text
 xsmb-data-lake/
@@ -82,20 +86,19 @@ xsmb-data-lake/
 │   └── loto-daily/
 │       └── year=2026/month=07/loto-daily.parquet
 ├── gold/
-│   ├── latest/
-│   │   ├── fact-draw-result.parquet
-│   │   ├── fact-draw-result.csv
-│   │   ├── fact-loto-daily.parquet
-│   │   ├── fact-loto-daily.csv
-│   │   ├── fact-special-prize.parquet
-│   │   ├── fact-special-prize.csv
-│   │   ├── dim-date.parquet
-│   │   ├── dim-date.csv
-│   │   ├── dim-number.parquet
-│   │   └── dim-number.csv
+│   ├── releases/
+│   │   └── run-id=<uuid>/
+│   │       ├── fact-draw-result.parquet
+│   │       ├── fact-loto-daily.parquet
+│   │       ├── fact-special-prize.parquet
+│   │       ├── dim-date.parquet
+│   │       └── dim-number.parquet
 │   └── snapshots/
-│       └── as-of=2026-07-16/
-│           └── manifest.json
+│       └── as-of=2026-07-16/run-id=<uuid>/manifest.json
+├── exports/
+│   └── csv/
+│       ├── latest.json
+│       └── run-id=<uuid>/*.csv
 ├── quality/
 │   └── year=2026/month=07/date=2026-07-16/
 │       └── report.json
@@ -110,8 +113,8 @@ xsmb-data-lake/
 - Bronze objects are immutable. Never overwrite a successful raw response unless `--force` is explicitly provided.
 - Store one Bronze object group per draw date.
 - Compact Silver Parquet files by month to avoid the small-file problem.
-- Gold `latest` objects may be overwritten after a successful run.
-- Publish a Gold snapshot manifest only after all required objects are uploaded successfully.
+- Gold release objects are immutable; only the validated `manifests/latest.json` pointer moves by compare-and-swap.
+- Publish an immutable Gold snapshot manifest only after all required objects are uploaded successfully.
 - Consumers must use `manifests/latest.json` to identify the most recent complete dataset.
 - Do not treat a partially uploaded run as the latest successful run.
 
@@ -568,12 +571,12 @@ Additional requirements:
 
 ## 15. Power BI serving strategy
 
-Power BI should consume public, non-sensitive Gold CSV files through an R2 custom domain.
+Power BI should consume the immutable CSV release selected by `exports/csv/latest.json` through a curated router.
 
 Example stable URL:
 
 ```text
-https://data.example.com/xsmb/gold/latest/fact-loto-daily.csv
+https://data.example.com/xsmb/exports/csv/run-id=<resolved-run-id>/fact-loto-daily.csv
 ```
 
 Example Power Query:
@@ -582,7 +585,7 @@ Example Power Query:
 let
     Source = Csv.Document(
         Web.Contents(
-            "https://data.example.com/xsmb/gold/latest/fact-loto-daily.csv"
+            "https://data.example.com/xsmb/exports/csv/run-id=<resolved-run-id>/fact-loto-daily.csv"
         ),
         [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]
     ),
@@ -633,11 +636,14 @@ CREATE SECRET r2_secret (
     ACCOUNT_ID '<R2_ACCOUNT_ID>'
 );
 
+-- Resolve this run ID from manifests/latest.json and verify its object references.
+SET VARIABLE gold_root = 'r2://xsmb-data-lake/gold/releases/run-id=<resolved-run-id>';
+
 SELECT
     number_2d,
     SUM(frequency) AS total_frequency
 FROM read_parquet(
-    'r2://xsmb-data-lake/gold/latest/fact-loto-daily.parquet'
+    getvariable('gold_root') || '/fact-loto-daily.parquet'
 )
 GROUP BY number_2d
 ORDER BY total_frequency DESC;
@@ -725,7 +731,7 @@ The project must provide a local mode that writes to `output/` and does not requ
 - Add the R2 client.
 - Implement Bronze upload.
 - Implement Silver monthly Parquet output.
-- Implement Gold CSV and Parquet output.
+- Implement immutable Gold Parquet output plus an on-demand/weekly CSV export.
 - Implement manifest publication.
 - Add mocked R2 tests.
 
@@ -764,7 +770,7 @@ The R2 enhancement is accepted only when all of the following are true:
 - Re-running the same successful date without `--force` creates no duplicate logical records.
 - A failed middle date is retried even when later dates succeed.
 - Silver Parquet is partitioned or compacted by month.
-- Gold fact and dimension tables are produced in both CSV and Parquet.
+- Gold fact and dimension tables are published as immutable Parquet and can be materialized as immutable CSV exports.
 - The latest manifest is updated only after all objects are uploaded successfully.
 - No secrets appear in Git, logs, tests, documentation, or generated output.
 - GitHub Actions no longer commits generated data and images to the repository.

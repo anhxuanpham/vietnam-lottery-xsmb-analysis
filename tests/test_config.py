@@ -41,7 +41,20 @@ def test_r2_endpoint_is_derived_without_exposing_secret() -> None:
     assert settings.resolved_r2_endpoint_url == 'https://account-id.r2.cloudflarestorage.com'
     assert settings.resolved_xsmn_r2_endpoint_url == settings.resolved_r2_endpoint_url
     assert settings.resolved_xsmt_r2_endpoint_url == settings.resolved_r2_endpoint_url
+    assert settings.resolved_backup_r2_endpoint_url == settings.resolved_r2_endpoint_url
     assert 'super-secret' not in repr(settings)
+
+
+def test_backup_endpoint_can_use_an_independent_account() -> None:
+    settings = Settings(
+        _env_file=None,
+        r2_backup_account_id='backup-account',
+        r2_backup_access_key_id='backup-access',
+        r2_backup_secret_access_key='backup-secret',
+    )
+
+    assert settings.resolved_backup_r2_endpoint_url == 'https://backup-account.r2.cloudflarestorage.com'
+    assert 'backup-secret' not in repr(settings)
 
 
 def test_production_settings_require_r2_credentials() -> None:

@@ -16,7 +16,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       ETL_ENV: production
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -42,6 +42,10 @@ jobs:
         shell: bash
         run: |
           if [[ -n "$DASHBOARD_INGEST_URL" && -n "$DASHBOARD_INGEST_TOKEN" ]]; then
+            if [[ "$DASHBOARD_INGEST_URL" != */api/admin/lottery ]]; then
+              echo "DASHBOARD_INGEST_URL must end with /api/admin/lottery." >&2
+              exit 1
+            fi
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
@@ -71,6 +75,7 @@ jobs:
         if: steps.config.outputs.ready == 'true'
         shell: bash
         run: |
+          set -o pipefail
           uv run lottery-etl status --storage r2 --region all --json | tee lake-status.json
           vietnam_time="$(TZ=Asia/Ho_Chi_Minh date +%H%M)"
           if (( 10#$vietnam_time < 1835 )); then
@@ -80,7 +85,7 @@ jobs:
           fi
           echo "expected_date=$expected_date" >> "$GITHUB_OUTPUT"
           jq --exit-status --arg expected_date "$expected_date" \
-            'all(.[]; .target_date == $expected_date)' \
+            'all(.[]; .healthy == true and .target_date == $expected_date)' \
             lake-status.json >/dev/null
 
       - name: Audit complete published history
@@ -104,6 +109,7 @@ jobs:
         if: steps.config.outputs.ready == 'true'
         shell: bash
         run: |
+          set -euo pipefail
           request_headers=(
             -H "Authorization: Bearer $DASHBOARD_INGEST_TOKEN"
             -H "Content-Type: application/json"
@@ -116,10 +122,26 @@ jobs:
 
           for region in xsmb xsmn xsmt; do
             output="/tmp/${region}-dashboard.json"
+            v2_root="/tmp/${region}-serving-v2"
             uv run python scripts/export_serving_data.py \
               --storage r2 \
               --region "$region" \
-              --output "$output"
+              --output "$output" \
+              --v2-output-dir "$v2_root"
+            metadata="$v2_root/v2/regions/$region/latest.json"
+            jq --exit-status --arg region "$region" '
+              .schemaVersion == 2 and
+              .region == $region and
+              (.releaseId | type == "string" and length > 0) and
+              (.stations | type == "array" and length > 0) and
+              all(.stations[];
+                (.code | type == "string" and length > 0) and
+                (.years | type == "array" and length > 0) and
+                all(.years[]; type == "number")
+              )
+            ' "$metadata" >/dev/null
+            metadata_release="$(jq -er '.releaseId' "$metadata")"
+            expected_shard_count="$(jq -er '[.stations[].years[]] | length' "$metadata")"
             curl \
               --fail-with-body \
               --show-error \
@@ -130,6 +152,118 @@ jobs:
               "${request_headers[@]}" \
               --data-binary "@$output" \
               "${DASHBOARD_INGEST_URL}?region=${region}"
+
+            shard_count=0
+            shard_list="$(mktemp)"
+            if ! find "$v2_root/v2/releases" -type f -name '*.json' -print0 | sort -z > "$shard_list"; then
+              echo "Unable to enumerate v2 shards for $region" >&2
+              exit 1
+            fi
+            while IFS= read -r -d '' shard; do
+              relative="${shard#"$v2_root"/}"
+              if [[ ! "$relative" =~ ^v2/releases/([^/]+)/regions/([^/]+)/stations/([^/]+)/years/([0-9]{4})\.json$ ]]; then
+                echo "Unexpected v2 shard path: $relative" >&2
+                exit 1
+              fi
+              release="${BASH_REMATCH[1]}"
+              shard_region="${BASH_REMATCH[2]}"
+              station="${BASH_REMATCH[3]}"
+              year="${BASH_REMATCH[4]}"
+              if [[ "$shard_region" != "$region" ]]; then
+                echo "V2 shard region mismatch: $relative" >&2
+                exit 1
+              fi
+              if [[ "$release" != "$metadata_release" ]]; then
+                echo "V2 shard release mismatch: $relative" >&2
+                exit 1
+              fi
+              curl \
+                --fail-with-body \
+                --show-error \
+                --silent \
+                --retry 3 \
+                --retry-all-errors \
+                --request PUT \
+                "${request_headers[@]}" \
+                --data-binary "@$shard" \
+                "${DASHBOARD_INGEST_URL%/api/admin/lottery}/api/admin/lottery-v2?kind=shard&region=${region}&release=${release}&station=${station}&year=${year}" \
+                >/dev/null
+              shard_count=$((shard_count + 1))
+            done < "$shard_list"
+            rm -f "$shard_list"
+
+            if (( shard_count != expected_shard_count )); then
+              echo "V2 shard count mismatch for $region: uploaded=$shard_count expected=$expected_shard_count" >&2
+              exit 1
+            fi
+            curl \
+              --fail-with-body \
+              --show-error \
+              --silent \
+              --retry 3 \
+              --retry-all-errors \
+              --request PUT \
+              "${request_headers[@]}" \
+              --data-binary "@$metadata" \
+              "${DASHBOARD_INGEST_URL%/api/admin/lottery}/api/admin/lottery-v2?kind=metadata&region=${region}" \
+              >/dev/null
+            jq -cn \
+              --arg region "$region" \
+              --argjson shards "$shard_count" \
+              '{region: $region, shards: $shards, metadataPublished: true}' \
+              >> serving-v2-summary.jsonl
+          done
+
+      - name: Verify private serving APIs and v2 releases
+        id: serving_api
+        if: steps.publish_payloads.outcome == 'success'
+        shell: bash
+        run: |
+          base_url="${DASHBOARD_INGEST_URL%/api/admin/lottery}"
+          serving_headers=(-H "Accept: application/json")
+          if [[ -n "$DASHBOARD_SITES_BYPASS_TOKEN" ]]; then
+            serving_headers+=(
+              -H "OAI-Sites-Authorization: Bearer $DASHBOARD_SITES_BYPASS_TOKEN"
+            )
+          fi
+
+          curl \
+            --fail-with-body \
+            --show-error \
+            --silent \
+            --retry 3 \
+            --retry-all-errors \
+            "${serving_headers[@]}" \
+            --output serving-health.json \
+            "$base_url/api/health/lottery"
+          jq --exit-status '.healthy == true and .v2Required == true' serving-health.json >/dev/null
+
+          for region in xsmb xsmn xsmt; do
+            metadata="serving-${region}-metadata.json"
+            results="serving-${region}-results.json"
+            curl \
+              --fail-with-body \
+              --show-error \
+              --silent \
+              --retry 3 \
+              --retry-all-errors \
+              "${serving_headers[@]}" \
+              --output "$metadata" \
+              "$base_url/api/v2/lottery?region=$region"
+            station="$(jq -er '.stations[0].code' "$metadata")"
+            release="$(jq -er '.releaseId' "$metadata")"
+            curl \
+              --fail-with-body \
+              --show-error \
+              --silent \
+              --retry 3 \
+              --retry-all-errors \
+              "${serving_headers[@]}" \
+              --output "$results" \
+              "$base_url/api/v2/results?region=$region&station=$station&limit=1"
+            jq --exit-status --arg release "$release" \
+              '.schemaVersion == 2 and .releaseId == $release and (.items | length) == 1' \
+              "$results" >/dev/null
           done
 
       - name: Upload publication health evidence
@@ -140,6 +274,10 @@ jobs:
           path: |
             lake-status.json
             history-audit.json
+            serving-v2-summary.jsonl
+            serving-health.json
+            serving-*-metadata.json
+            serving-*-results.json
           if-no-files-found: warn
           retention-days: 30
 
@@ -165,14 +303,26 @@ jobs:
               jq -r 'to_entries[] | .key as $region | .value.issues[]? | "- \($region | ascii_upcase) \(.severity | ascii_upcase) \(.code): \(.message)"' \
                 history-audit.json >> "$GITHUB_STEP_SUMMARY"
             fi
+            if [[ -s serving-v2-summary.jsonl ]]; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "#### Historical API v2" >> "$GITHUB_STEP_SUMMARY"
+              jq -r '"- \(.region | ascii_upcase): \(.shards) immutable station/year shards + metadata pointer"' \
+                serving-v2-summary.jsonl >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if [[ -s serving-health.json ]] && jq empty serving-health.json >/dev/null 2>&1; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "#### Serving API smoke" >> "$GITHUB_STEP_SUMMARY"
+              jq -r '"- health=\(.healthy), v2Required=\(.v2Required), target=\(.expectedTargetDate)"' \
+                serving-health.json >> "$GITHUB_STEP_SUMMARY"
+            fi
 
             echo "" >> "$GITHUB_STEP_SUMMARY"
             if [[ "${{ steps.metadata.outcome }}" == "failure" ]]; then
               echo "Publishing blocked by the Gold metadata gate." >> "$GITHUB_STEP_SUMMARY"
             elif [[ "${{ steps.history_audit.outcome }}" == "failure" ]]; then
               echo "Publishing blocked by the complete-history audit." >> "$GITHUB_STEP_SUMMARY"
-            elif [[ "${{ steps.publish_payloads.outcome }}" == "success" ]]; then
-              echo "Published compact XSMB, XSMN, and XSMT payloads." >> "$GITHUB_STEP_SUMMARY"
+            elif [[ "${{ steps.serving_api.outcome }}" == "success" ]]; then
+              echo "Published v1 compact payloads and v2 historical releases for XSMB, XSMN, and XSMT." >> "$GITHUB_STEP_SUMMARY"
             else
               echo "Dashboard publishing failed. Inspect the first failed workflow step." >> "$GITHUB_STEP_SUMMARY"
             fi

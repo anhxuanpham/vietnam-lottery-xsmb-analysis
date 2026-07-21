@@ -1,8 +1,10 @@
--- Run against the independent XSMN Gold Parquet files.
+-- Resolve XSMN manifests/latest.json, verify its checksums, and set this to the
+-- downloaded or R2-hosted immutable release directory.
+SET VARIABLE gold_root = 'gold/releases/run-id=<RUN_ID>';
 
 -- Must return no rows: station draws without 18 prize rows.
 SELECT draw_date, station_code, COUNT(*) AS row_count
-FROM read_parquet('gold/latest/fact-draw-result.parquet')
+FROM read_parquet(getvariable('gold_root') || '/fact-draw-result.parquet')
 GROUP BY draw_date, station_code
 HAVING COUNT(*) <> 18;
 
@@ -12,13 +14,13 @@ SELECT
     station_code,
     COUNT(*) AS row_count,
     SUM(frequency) AS frequency_sum
-FROM read_parquet('gold/latest/fact-loto-daily.parquet')
+FROM read_parquet(getvariable('gold_root') || '/fact-loto-daily.parquet')
 GROUP BY draw_date, station_code
 HAVING COUNT(*) <> 100 OR SUM(frequency) <> 18;
 
 -- Must return no rows: duplicate XSMN draw business keys.
 SELECT draw_date, station_code, prize_group, prize_order, COUNT(*) AS duplicate_count
-FROM read_parquet('gold/latest/fact-draw-result.parquet')
+FROM read_parquet(getvariable('gold_root') || '/fact-draw-result.parquet')
 GROUP BY draw_date, station_code, prize_group, prize_order
 HAVING COUNT(*) > 1;
 
@@ -27,7 +29,7 @@ WITH actual AS (
     SELECT
         draw_date,
         string_agg(DISTINCT station_code, ',' ORDER BY station_code) AS actual_station_codes
-    FROM read_parquet('gold/latest/fact-draw-result.parquet')
+    FROM read_parquet(getvariable('gold_root') || '/fact-draw-result.parquet')
     GROUP BY draw_date
 ),
 expected AS (

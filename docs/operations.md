@@ -7,15 +7,19 @@ Every operation targets one independent lake with `--region xsmb`, `--region xsm
 1. The source page matches the requested date.
 2. XSMB contains 27 values; every XSMN/XSMT station contains 18 values. XSMN and XSMT must match their exact weekday station calendars, not only the station count. XSMT Sunday uses `KH, KT` through 2021 and `KH, KT, TTH` from `2022-01-02`. Six exact source-observed partial sets are versioned for 2021: `2021-07-27 QNA`, `2021-08-03 QNA`, `2021-08-06 GL`, `2021-08-18 KH`, `2021-08-21 DNO/QNG`, and `2021-09-04 DNA/DNO`; arbitrary omissions remain a critical failure.
 3. Critical quality checks pass at the correct date/station grain.
-4. Bronze is written once; monthly Silver and all Gold latest objects are updated in that region's lake.
-5. A run manifest and snapshot manifest are written.
-6. That lake's `manifests/latest.json` is written last.
+4. Bronze is written once; touched monthly Silver is updated and immutable Gold Parquet is written under the run ID.
+5. An immutable success run manifest and snapshot manifest are written.
+6. That lake's monotonic, compare-and-swap `manifests/latest.json` pointer is written last; compact ControlState follows.
 
 ## Failure and backfill
 
 A source page that explicitly states “không mở thưởng” writes a `no_draw` manifest. An HTTP failure, unexpected missing table, or parser/layout error writes a `failed` manifest instead. During a range backfill, neither outcome stops later dates: every date receives a result entry and processing advances. Failed dates remain eligible for a future backfill; `no_draw` dates are skipped unless `--force` is used.
 
-XSMB, XSMN, and XSMT range backfills validate and upsert Bronze/Silver one date at a time, then rebuild Silver Loto and publish Gold once after the batch. Until that final publication succeeds, the previous `manifests/latest.json` remains the pointer, and consumers must keep verifying its object checksums because `gold/latest/*` objects are mutable during publication. An interrupted run is safe to repeat because completed Bronze objects and Silver business keys are reused. XSMB also detects a control manifest newer than the current publication, so rerunning the same range completes Gold after an interruption that already recorded `no_draw`.
+XSMB, XSMN, and XSMT range backfills validate and upsert Bronze/Silver one date at a time, then rebuild Silver Loto
+and publish one immutable Gold release after the batch. Until that final publication succeeds, consumers keep reading
+the previous manifest-selected release; Gold objects are never mutated in place. An interrupted run is safe to repeat
+because completed Bronze objects and Silver business keys are reused. A ControlState revision newer than Gold causes
+the rerun to finish the missing publication, including a `no_draw`-only batch.
 
 Some historical primary pages omit the first digit of station special prizes. Only strictly reconcilable corruption activates the independent XSMN/XSMT fallback source. The result is accepted only when station identity and all unaffected prizes agree. Reconciled Bronze retains `response.html`, `fallback-response.html`, both source URLs and hashes, and `reconciliation=full_station_prize_comparison`. A disagreement remains `failed`; the pipeline never guesses or zero-pads the missing digit.
 
@@ -109,8 +113,10 @@ for 30 days.
 If a gate fails before it can emit valid JSON, the artifact retains the report from any earlier completed gate.
 After both gates pass, the workflow downloads only the published
 `fact-draw-result.parquet` plus `dim-station.parquet` where applicable, exports 455 recent draws per station, and
-uploads compact JSON to the Sites Worker. The three source lakes stay private; the browser only reads the separate
-`LOTTERY_DATA` serving bucket.
+uploads compact JSON plus immutable v2 station/year shards to the Sites Worker. V2 metadata moves last. The three
+source lakes stay private; the browser only reads the separate `LOTTERY_DATA` serving bucket. Before moving the v2
+pointer, the Worker checks that it matches the currently published compact boundary, is not a rollback, and that every
+declared shard exists and passes its contract. The workflow then probes health, metadata, and one result for each region.
 
 GitHub Actions configuration (one entry per line):
 
@@ -121,9 +127,36 @@ DASHBOARD_SITES_BYPASS_TOKEN (secret) = Sites owner-only bypass token
 ```
 
 If the URL or ingest token is absent, the automatic workflow records a skipped publication instead of touching the
-serving bucket. A configured publish must return success for all three regions; otherwise the workflow fails. The
+serving bucket. Because the current site is owner-only, `DASHBOARD_SITES_BYPASS_TOKEN` is also required for ingest and
+post-publish probes; a missing or expired bypass fails the configured run instead of silently claiming success. A
+configured publish must return success for all three regions; otherwise the workflow fails. The
 Worker validates the region, schema, content type, token, and 8 MiB body limit before replacing
 `regions/<region>.json`.
+
+The Worker health endpoint is `GET /api/health/lottery` (`200` healthy, `503` unhealthy). V2 enforcement activates only
+after all three regional pointers have been published once, so deploying the Worker before the first v2 publish does
+not create a false outage; after activation, missing/invalid/stale v2 metadata makes health fail. This Sites deployment is
+owner-only, so an external probe must include
+`OAI-Sites-Authorization: Bearer $DASHBOARD_SITES_BYPASS_TOKEN`; an unauthenticated request correctly returns `401`.
+The internal Cloudflare cron does not need that header. It runs every 15 minutes from 20:00 through 22:45 Vietnam
+time, writes watchdog state, an append-only ledger and incident/recovery evidence to `LOTTERY_DATA`; warning starts
+at 20:00 and escalates at 20:30. Configure the optional HTTPS runtime secret `ALERT_WEBHOOK_URL` to deliver
+deduplicated alerts.
+
+## CSV export and release recovery
+
+Daily Gold contains Parquet only. `Export Lottery CSV Snapshots` runs weekly and publishes
+`exports/csv/run-id=<run>/*.csv`, an immutable manifest, then CAS-updates `exports/csv/latest.json`. BI must resolve
+that pointer instead of assuming `gold/latest`.
+
+`Backup Published Lottery Releases` copies the exact manifest-selected Gold/run/snapshot/ControlState boundary to
+`R2_BACKUP_BUCKET_NAME`, verifies every checksum, restores it into a fresh local directory, and checks all three
+restored regions. Prefer dedicated `R2_BACKUP_ACCOUNT_ID`, `R2_BACKUP_ACCESS_KEY_ID`, and
+`R2_BACKUP_SECRET_ACCESS_KEY` so a primary credential failure does not remove the backup failure domain.
+
+This is a serving-boundary recovery, not a full ETL lake backup: it does not include Bronze or Silver. Restore is
+therefore blocked for primary R2 and writes `recovery/consumer-only.json`; all ETL mutation commands reject that lake.
+Use the isolated restore to serve/audit Gold while arranging a full Bronze/Silver recovery.
 
 ## Local verification
 

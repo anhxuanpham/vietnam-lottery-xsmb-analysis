@@ -6,6 +6,13 @@ import {
   isLotteryRegion,
   type LotteryRegion,
 } from "../lottery-contract";
+import { handleLotteryHealthRequest } from "./health.ts";
+import {
+  handleLotteryV2Ingest,
+  handleLotteryV2Metadata,
+  handleLotteryV2Results,
+} from "./lottery-v2.ts";
+import { runLotteryWatchdog } from "./watchdog.ts";
 
 const MAX_INGEST_BYTES = 8 * 1024 * 1024;
 const IMAGE_OUTPUT_FORMATS = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/avif"] as const;
@@ -202,6 +209,10 @@ const worker = {
 
     if (url.pathname === "/api/lottery") return getLotteryData(request, env, url);
     if (url.pathname === "/api/admin/lottery") return putLotteryData(request, env, url);
+    if (url.pathname === "/api/v2/lottery") return handleLotteryV2Metadata(request, env, url);
+    if (url.pathname === "/api/v2/results") return handleLotteryV2Results(request, env, url);
+    if (url.pathname === "/api/admin/lottery-v2") return handleLotteryV2Ingest(request, env, url);
+    if (url.pathname === "/api/health/lottery") return handleLotteryHealthRequest(request, env);
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];
@@ -216,6 +227,9 @@ const worker = {
     }
 
     return handler.fetch(request, env, ctx);
+  },
+  async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+    await runLotteryWatchdog(controller, env);
   },
 };
 

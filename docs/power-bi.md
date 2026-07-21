@@ -1,6 +1,8 @@
 # Power BI exercise
 
-Power BI should read curated Gold CSV from a stable Cloudflare custom-domain URL. Choose the XSMB, XSMN, or XSMT route explicitly; every route targets a different bucket. Bronze, Silver, credentials, and presigned URLs are not Power BI data sources.
+Power BI should resolve the weekly CSV export manifest from a stable Cloudflare custom-domain URL. Choose XSMB,
+XSMN, or XSMT explicitly; every route targets a different bucket. Bronze, Silver, credentials, presigned URLs, and
+the private daily Parquet release are not Power BI data sources.
 
 ## Load `fact-loto-daily`
 
@@ -8,10 +10,16 @@ Replace the host/path with the public custom-domain route configured for your bu
 
 ```powerquery
 let
+    BaseUrl = "https://data.example.com/xsmb/",
+    ExportManifest = Json.Document(Web.Contents(BaseUrl & "exports/csv/latest.json")),
+    FactReference = List.First(
+        List.Select(
+            ExportManifest[objects],
+            each Text.EndsWith(_[key], "/fact-loto-daily.csv")
+        )
+    ),
     Source = Csv.Document(
-        Web.Contents(
-            "https://data.example.com/xsmb/gold/latest/fact-loto-daily.csv"
-        ),
+        Web.Contents(BaseUrl & FactReference[key]),
         [Delimiter=",", Encoding=65001, QuoteStyle=QuoteStyle.Csv]
     ),
     Headers = Table.PromoteHeaders(Source, [PromoteAllScalars=true]),
@@ -51,4 +59,6 @@ Label every frequency or waiting-time view as descriptive. It is not evidence th
 
 ## Refresh check
 
-Before enabling scheduled refresh, open the selected region's `manifests/latest.json`, verify its `region`, and confirm the expected CSV is listed. Refresh should use the stable custom-domain URL, not an expiring signed URL.
+Before enabling scheduled refresh, open `exports/csv/latest.json`, verify `region`, `dataset_version`, and the expected
+CSV reference, then verify its run is no newer than the region's `manifests/latest.json`. Refresh the manifest URL,
+not a hard-coded run path or expiring signed URL. CSV updates weekly; daily dashboard data uses Results API v2.

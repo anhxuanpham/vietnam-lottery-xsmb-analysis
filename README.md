@@ -29,6 +29,9 @@ XSMT source -> XSMT bucket -> Bronze -> Silver -> Gold -> XSMT consumers
 ```
 
 `manifests/latest.json` is the publication boundary inside each lake. It is updated only after the complete Gold dataset and snapshot manifest have been written.
+Draw outcomes are compacted into immutable `control/versions/<revision>.json` snapshots plus the small
+`control/latest.json` pointer. Pointer updates use compare-and-swap, so concurrent writers retry instead of dropping
+another date's status.
 
 ## Local setup
 
@@ -78,6 +81,9 @@ uv run lottery-etl build-gold --region xsmn
 uv run lottery-etl validate --region xsmn
 uv run lottery-etl audit-history --storage r2 --region all
 uv run lottery-etl download-gold --region all --download-output downloads/
+uv run lottery-etl export-csv --storage r2 --region all
+uv run lottery-etl backup-release --storage r2 --region all --backup-storage r2
+uv run lottery-etl restore-release --storage local --output /tmp/lottery-recovery --region all --backup-storage r2
 uv run lottery-etl no-draw --region xsmn --target-date 2026-07-16 --detail "Officially confirmed no draw"
 ```
 
@@ -125,7 +131,10 @@ A single bucket-scoped token may be authorized for all three buckets. For strict
 
 The XSMB parser also recognizes one narrow historical source defect: the complete prize-5 and prize-6 values are present but their CSS classes are exchanged. It repairs the groups only when every other prize group is complete and both exchanged groups match the opposite group's exact count and digit widths; near-matches still fail.
 
-Keep Bronze and Silver private; expose only curated `gold/latest/*.csv` and Parquet objects through controlled custom-domain routes. See [R2 setup](docs/r2-setup.md) for the activation checklist and credential troubleshooting.
+Keep Bronze and Silver private. Daily publication writes immutable Parquet under
+`gold/releases/run-id=<run>/`; consumers resolve the exact release through `manifests/latest.json` and verify every
+size/SHA-256 reference. The weekly export writes immutable CSV under `exports/csv/run-id=<run>/` and moves
+`exports/csv/latest.json` last. See [R2 setup](docs/r2-setup.md) for the activation checklist.
 
 ## Analytics and BI
 
@@ -139,7 +148,10 @@ Keep Bronze and Silver private; expose only curated `gold/latest/*.csv` and Parq
 - [XSMT SQL quality checks](sql/xsmt-data-quality-checks.sql)
 - [Python public-Gold example](examples/read_gold.py)
 
-XSMN and XSMT Gold add `dim-station` and station fields to all facts. Gold CSV files are intended for Power BI and Tableau; Parquet files support Python and DuckDB. Credentials and presigned URLs are never committed.
+XSMN and XSMT Gold add `dim-station` and station fields to all facts. Manifest-addressed weekly CSV exports are
+intended for Power BI and Tableau; immutable Parquet supports Python and DuckDB. Credentials and presigned URLs are
+never committed. Analytics results carry `dataset_version`, and walk-forward calculations use only prior rows to
+prevent leakage.
 
 Audit the complete published history after a backfill with:
 
@@ -155,10 +167,20 @@ The audit starts at the first supported date for each lake (XSMB `2005-10-01`, X
 - `ci.yml` runs Ruff, pytest, all three offline fixture pipelines, and frontend lint/type/build/API tests without production secrets.
 - `daily-etl.yml` queues at 18:17 Vietnam time, waits until the safe 18:35 draw cutoff, then runs all three independent R2 lakes. Manual region, target-date, and force inputs remain available without the scheduled wait.
 - `dashboard-publish.yml` runs at 19:47 Vietnam time, away from GitHub's top-of-hour scheduling hotspot. It validates healthy manifests against the 18:35 draw cutoff, audits the complete published history of all three lakes, and only then exports compact station-grain JSON to the private Sites serving bucket. Gate reports produced by each run are retained as a workflow artifact for 30 days.
+- `weekly-csv-export.yml` materializes verified CSV snapshots every Sunday without doubling every daily Gold write.
+- `backup-and-restore-drill.yml` backs up the exact published Gold/Control boundary and proves an isolated,
+  consumer-only restore every day. It intentionally does not restore Bronze/Silver and therefore cannot target or
+  resume the primary ETL lake.
 - `xsmn-backfill.yml` runs resumable yearly XSMN batches from 2010 onward, one year at a time, and publishes Gold once per batch. The current-year batch stops at yesterday because the daily ETL owns today's draw after publication time.
 - `xsmt-backfill.yml` does the same for XSMT from 2018 onward using its own concurrency group and bucket.
 - `xsmb-gap-repair.yml` is a manual, bounded historical repair. It shares the XSMB daily concurrency group, never uses `--force`, publishes Gold once, audits the requested range, and retains its JSON evidence for 30 days.
 - The daily workflow has read-only repository permissions and writes generated data to R2 rather than committing it to Git.
+
+The Sites Worker exposes `/api/health/lottery`, `/api/v2/lottery`, and cursor-paginated `/api/v2/results`. Its
+15-minute watchdog window checks the three serving snapshots plus the activated v2 release pointers directly, records incidents/recovery in R2, and sends an
+optional webhook when `ALERT_WEBHOOK_URL` is configured. The Explorer loads historical year/station shards lazily and
+falls back to the compact snapshot if history is temporarily unavailable. The deployed site is owner-only; external
+API probes use the configured Sites bypass header, while the internal watchdog calls the health logic directly.
 
 ## Legacy analysis
 

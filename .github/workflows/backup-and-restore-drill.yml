@@ -1,0 +1,163 @@
+name: Backup Published Lottery Releases
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Run after the regional ETL and dashboard publication windows.
+    - cron: "17 14 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lottery-release-backup
+  cancel-in-progress: false
+
+jobs:
+  backup-and-drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ETL_ENV: production
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+      R2_XSMN_BUCKET_NAME: ${{ secrets.R2_XSMN_BUCKET_NAME }}
+      R2_XSMN_ACCOUNT_ID: ${{ secrets.R2_XSMN_ACCOUNT_ID }}
+      R2_XSMN_ACCESS_KEY_ID: ${{ secrets.R2_XSMN_ACCESS_KEY_ID }}
+      R2_XSMN_SECRET_ACCESS_KEY: ${{ secrets.R2_XSMN_SECRET_ACCESS_KEY }}
+      R2_XSMN_ENDPOINT_URL: ${{ secrets.R2_XSMN_ENDPOINT_URL }}
+      R2_XSMT_BUCKET_NAME: ${{ secrets.R2_XSMT_BUCKET_NAME }}
+      R2_XSMT_ACCOUNT_ID: ${{ secrets.R2_XSMT_ACCOUNT_ID }}
+      R2_XSMT_ACCESS_KEY_ID: ${{ secrets.R2_XSMT_ACCESS_KEY_ID }}
+      R2_XSMT_SECRET_ACCESS_KEY: ${{ secrets.R2_XSMT_SECRET_ACCESS_KEY }}
+      R2_XSMT_ENDPOINT_URL: ${{ secrets.R2_XSMT_ENDPOINT_URL }}
+      R2_BACKUP_BUCKET_NAME: ${{ secrets.R2_BACKUP_BUCKET_NAME }}
+      R2_BACKUP_ACCOUNT_ID: ${{ secrets.R2_BACKUP_ACCOUNT_ID }}
+      R2_BACKUP_ACCESS_KEY_ID: ${{ secrets.R2_BACKUP_ACCESS_KEY_ID }}
+      R2_BACKUP_SECRET_ACCESS_KEY: ${{ secrets.R2_BACKUP_SECRET_ACCESS_KEY }}
+      R2_BACKUP_ENDPOINT_URL: ${{ secrets.R2_BACKUP_ENDPOINT_URL }}
+    steps:
+      - name: Check backup configuration
+        id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for variable in \
+            R2_BACKUP_BUCKET_NAME \
+            R2_BACKUP_ACCOUNT_ID \
+            R2_BACKUP_ACCESS_KEY_ID \
+            R2_BACKUP_SECRET_ACCESS_KEY
+          do
+            if [[ -z "${!variable:-}" ]]; then
+              missing+=("$variable")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            echo "Missing required dedicated backup configuration: ${missing[*]}" >&2
+            exit 1
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.config.outputs.ready == 'true'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        if: steps.config.outputs.ready == 'true'
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+
+      - name: Install locked runtime dependencies
+        if: steps.config.outputs.ready == 'true'
+        run: uv sync --frozen --no-dev
+
+      - name: Back up all published release boundaries
+        if: steps.config.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run lottery-etl backup-release \
+            --storage r2 \
+            --region all \
+            --backup-storage r2 \
+            | tee backup-evidence.json
+          jq -e '
+            type == "array" and
+            length == 3 and
+            ([.[].region] | sort) == ["xsmb", "xsmn", "xsmt"] and
+            all(.[];
+              .operation == "backup" and
+              (.run_id | type == "string" and length > 0) and
+              (.object_count | type == "number" and . > 0) and
+              (.manifest_key | type == "string" and length > 0)
+            )
+          ' backup-evidence.json >/dev/null
+
+      - name: Restore into an isolated local lake
+        if: steps.config.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run lottery-etl restore-release \
+            --storage local \
+            --output /tmp/lottery-restore-drill \
+            --region all \
+            --backup-storage r2 \
+            | tee restore-evidence.json
+          jq -e --slurpfile backup backup-evidence.json '
+            type == "array" and
+            length == 3 and
+            ([.[].region] | sort) == ["xsmb", "xsmn", "xsmt"] and
+            ([.[] | {region, run_id, object_count, total_size_bytes}] | sort_by(.region)) ==
+              ([$backup[0][] | {region, run_id, object_count, total_size_bytes}] | sort_by(.region)) and
+            all(.[]; .operation == "restore")
+          ' restore-evidence.json >/dev/null
+
+      - name: Verify restored publication boundaries
+        if: steps.config.outputs.ready == 'true'
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run lottery-etl status \
+            --storage local \
+            --output /tmp/lottery-restore-drill \
+            --region all \
+            --json \
+            | tee restore-status.json
+          jq -e --slurpfile restore restore-evidence.json '
+            type == "object" and
+            (keys | sort) == ["xsmb", "xsmn", "xsmt"] and
+            all(.[]; .healthy == true) and
+            ([to_entries[] | {region: .key, run_id: .value.run_id}] | sort_by(.region)) ==
+              ([$restore[0][] | {region, run_id}] | sort_by(.region))
+          ' restore-status.json >/dev/null
+
+      - name: Upload disaster-recovery evidence
+        if: always() && steps.config.outputs.ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lottery-dr-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            backup-evidence.json
+            restore-evidence.json
+            restore-status.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Write job summary
+        if: always()
+        shell: bash
+        run: |
+          echo "### Published release backup and restore drill" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "${{ steps.config.outputs.ready }}" != "true" ]]; then
+            echo "Failed: dedicated R2 backup credentials are incomplete." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ -s restore-status.json ]]; then
+            jq -r 'to_entries[] | "- \(.key | ascii_upcase): healthy=\(.value.healthy), run=\(.value.run_id), target=\(.value.target_date)"' \
+              restore-status.json >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Restore drill failed before health evidence was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi

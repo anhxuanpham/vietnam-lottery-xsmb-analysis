@@ -56,6 +56,62 @@ def test_cli_validates_fixture_without_creating_lake(tmp_path, capsys) -> None:
     assert not list(tmp_path.iterdir())
 
 
+def test_cli_backs_up_and_restores_published_release(tmp_path, capsys) -> None:
+    source = tmp_path / 'source'
+    backup = tmp_path / 'backup'
+    recovered = tmp_path / 'recovered'
+    assert (
+        main(
+            [
+                'run',
+                '--target-date',
+                '2026-07-16',
+                '--fixture',
+                'tests/fixtures/valid-result-page.html',
+                '--output',
+                str(source),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                'backup-release',
+                '--storage',
+                'local',
+                '--output',
+                str(source),
+                '--backup-output',
+                str(backup),
+            ]
+        )
+        == 0
+    )
+    backup_evidence = json.loads(capsys.readouterr().out)
+    assert backup_evidence['operation'] == 'backup'
+
+    assert (
+        main(
+            [
+                'restore-release',
+                '--storage',
+                'local',
+                '--output',
+                str(recovered),
+                '--backup-output',
+                str(backup),
+            ]
+        )
+        == 0
+    )
+    restore_evidence = json.loads(capsys.readouterr().out)
+    assert restore_evidence['operation'] == 'restore'
+    assert (recovered / 'manifests/latest.json').is_file()
+
+
 def test_cli_runs_xsmn_fixture_in_its_own_lake(tmp_path, capsys) -> None:
     arguments = [
         'run',
@@ -76,7 +132,13 @@ def test_cli_runs_xsmn_fixture_in_its_own_lake(tmp_path, capsys) -> None:
     assert result['region'] == 'xsmn'
     assert result['status'] == 'success'
     assert manifest.region.value == 'xsmn'
-    assert (tmp_path / 'gold/latest/dim-station.parquet').is_file()
+    latest = SouthernDataLakeRepository(
+        LocalObjectStore(tmp_path),
+        gold_cache_control='public, max-age=300',
+    ).latest_manifest()
+    assert latest is not None
+    station_key = next(reference.key for reference in latest.objects if reference.key.endswith('/dim-station.parquet'))
+    assert (tmp_path / station_key).is_file()
 
 
 def test_cli_validates_xsmn_fixture_without_creating_lake(tmp_path, capsys) -> None:

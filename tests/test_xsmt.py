@@ -179,7 +179,12 @@ def test_central_pipeline_publishes_an_independent_manifest(tmp_path) -> None:
     assert result.region is LotteryRegion.XSMT
     assert result.status == 'success'
     assert repository.latest_manifest().region is LotteryRegion.XSMT
-    assert (tmp_path / 'gold/latest/dim-station.parquet').is_file()
+    station_key = next(
+        reference.key
+        for reference in repository.latest_manifest().objects
+        if reference.key.endswith('/dim-station.parquet')
+    )
+    assert (tmp_path / station_key).is_file()
 
 
 def test_central_pipeline_accepts_documented_partial_draw(tmp_path) -> None:

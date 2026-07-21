@@ -6,6 +6,12 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict
 
+from xsmb_etl.gold_keys import (
+    LEGACY_GOLD_PREFIX,
+    gold_release_prefix,
+    legacy_snapshot_manifest_key,
+    snapshot_manifest_key,
+)
 from xsmb_etl.repository import CentralDataLakeRepository, DataLakeRepository, SouthernDataLakeRepository
 from xsmb_etl.run_models import DataObjectReference, LatestManifest, LotteryRegion, RunManifest, RunStatus
 from xsmb_etl.storage import ObjectNotFoundError, ObjectStoreError, StoredObject
@@ -49,26 +55,28 @@ class LakeStatus(BaseModel):
     issues: tuple[str, ...] = ()
 
 
-def inspect_lake(repository: Repository) -> LakeStatus:
+def inspect_lake(repository: Repository, *, latest_manifest: LatestManifest | None = None) -> LakeStatus:
     """Inspect manifests and HEAD metadata without reading Silver or Gold payloads."""
 
     issues: list[str] = []
     latest_key = 'manifests/latest.json'
-    if not repository.store.exists(latest_key):
-        return LakeStatus(
-            region=repository.region,
-            healthy=False,
-            issues=(f'{latest_key} is missing; this lake has no published consumer boundary',),
-        )
+    latest = latest_manifest
+    if latest is None:
+        if not repository.store.exists(latest_key):
+            return LakeStatus(
+                region=repository.region,
+                healthy=False,
+                issues=(f'{latest_key} is missing; this lake has no published consumer boundary',),
+            )
 
-    try:
-        latest = LatestManifest.model_validate_json(repository.store.get_bytes(latest_key))
-    except (ValueError, TypeError) as exc:
-        return LakeStatus(
-            region=repository.region,
-            healthy=False,
-            issues=(f'{latest_key} is invalid: {_brief_error(exc)}',),
-        )
+        try:
+            latest = LatestManifest.model_validate_json(repository.store.get_bytes(latest_key))
+        except (ValueError, TypeError) as exc:
+            return LakeStatus(
+                region=repository.region,
+                healthy=False,
+                issues=(f'{latest_key} is invalid: {_brief_error(exc)}',),
+            )
 
     if latest.region is not repository.region:
         issues.append(f'{latest_key} declares region {latest.region.value}, expected {repository.region.value}')
@@ -76,9 +84,19 @@ def inspect_lake(repository: Repository) -> LakeStatus:
         issues.append(f'{latest_key} dataset_version does not match run_id')
     if not latest.objects:
         issues.append(f'{latest_key} does not reference any published Gold objects')
-    for reference in latest.objects:
-        if not reference.key.startswith('gold/latest/'):
-            issues.append(f'{latest_key} references a non-Gold object: {reference.key}')
+    if latest.schema_version >= 2:
+        expected_release_prefix = gold_release_prefix(latest.run_id)
+        if latest.release_prefix != expected_release_prefix:
+            issues.append(f'{latest_key} release_prefix does not match run_id')
+        for reference in latest.objects:
+            if not reference.key.startswith(expected_release_prefix):
+                issues.append(f'{latest_key} mixes objects outside its immutable release: {reference.key}')
+    else:
+        if latest.release_prefix is not None:
+            issues.append(f'{latest_key} legacy schema must not declare release_prefix')
+        for reference in latest.objects:
+            if not reference.key.startswith(LEGACY_GOLD_PREFIX):
+                issues.append(f'{latest_key} legacy schema references a non-legacy Gold object: {reference.key}')
 
     run_manifest = _load_run_manifest(repository, latest, issues)
     if run_manifest is not None:
@@ -138,7 +156,11 @@ def _load_run_manifest(repository: Repository, latest: LatestManifest, issues: l
 
 
 def _check_snapshot(repository: Repository, latest: LatestManifest, issues: list[str]) -> bool:
-    key = f'gold/snapshots/as-of={latest.target_date.isoformat()}/manifest.json'
+    key = (
+        snapshot_manifest_key(latest.target_date, latest.run_id)
+        if latest.schema_version >= 2
+        else legacy_snapshot_manifest_key(latest.target_date)
+    )
     if not repository.store.exists(key):
         issues.append(f'{key} is missing')
         return False
@@ -154,7 +176,8 @@ def _check_snapshot(repository: Repository, latest: LatestManifest, issues: list
 
 
 def _check_run_objects(run_manifest: RunManifest, latest: LatestManifest, issues: list[str]) -> None:
-    run_objects = tuple(reference for reference in run_manifest.objects if reference.key.startswith('gold/latest/'))
+    expected_prefix = gold_release_prefix(latest.run_id) if latest.schema_version >= 2 else LEGACY_GOLD_PREFIX
+    run_objects = tuple(reference for reference in run_manifest.objects if reference.key.startswith(expected_prefix))
     run_signatures = sorted(_reference_signature(reference) for reference in run_objects)
     latest_signatures = sorted(_reference_signature(reference) for reference in latest.objects)
     if run_signatures == latest_signatures:

@@ -1,21 +1,25 @@
 # Tableau exercise
 
-The initial supported workflow uses curated Gold CSV or Parquet files. A Web Data Connector or Hyper extract is intentionally not required.
+The supported file workflow uses the manifest-addressed weekly CSV export or a locally downloaded current Parquet
+release. A Web Data Connector or Hyper extract is intentionally not required.
 
 ## Download
 
-Public custom domain:
+Resolve `exports/csv/latest.json`, copy the run ID, then download only referenced files. Example for one resolved run:
 
 ```bash
-curl -O https://data.example.com/xsmb/gold/latest/fact-loto-daily.csv
-curl -O https://data.example.com/xsmb/gold/latest/dim-number.csv
-curl -O https://data.example.com/xsmb/gold/latest/dim-date.csv
+XSMB_RUN_ID='<resolved-xsmb-run-id>'
+XSMN_RUN_ID='<resolved-xsmn-run-id>'
+XSMT_RUN_ID='<resolved-xsmt-run-id>'
+curl -O "https://data.example.com/xsmb/exports/csv/run-id=${XSMB_RUN_ID}/fact-loto-daily.csv"
+curl -O "https://data.example.com/xsmb/exports/csv/run-id=${XSMB_RUN_ID}/dim-number.csv"
+curl -O "https://data.example.com/xsmb/exports/csv/run-id=${XSMB_RUN_ID}/dim-date.csv"
 
 # XSMN/XSMT are separate bucket routes and add dim-station.
-curl -O https://data.example.com/xsmn/gold/latest/fact-loto-daily.csv
-curl -O https://data.example.com/xsmn/gold/latest/dim-station.csv
-curl -O https://data.example.com/xsmt/gold/latest/fact-loto-daily.csv
-curl -O https://data.example.com/xsmt/gold/latest/dim-station.csv
+curl -O "https://data.example.com/xsmn/exports/csv/run-id=${XSMN_RUN_ID}/fact-loto-daily.csv"
+curl -O "https://data.example.com/xsmn/exports/csv/run-id=${XSMN_RUN_ID}/dim-station.csv"
+curl -O "https://data.example.com/xsmt/exports/csv/run-id=${XSMT_RUN_ID}/fact-loto-daily.csv"
+curl -O "https://data.example.com/xsmt/exports/csv/run-id=${XSMT_RUN_ID}/dim-station.csv"
 ```
 
 Private/local object store:

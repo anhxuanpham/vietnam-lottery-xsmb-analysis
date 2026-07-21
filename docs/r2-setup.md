@@ -9,14 +9,18 @@ npx wrangler login
 npx wrangler r2 bucket create xsmb-data-lake
 npx wrangler r2 bucket create xsmn-data-lake
 npx wrangler r2 bucket create xsmt-data-lake
+npx wrangler r2 bucket create vietnam-lottery-backup
 npx wrangler r2 bucket list
 ```
 
-Bucket names are examples and may be changed. Keep all three buckets independent.
+Bucket names are examples and may be changed. Keep all three regional buckets independent. The backup bucket should
+preferably use a separate account/token failure domain.
 
 ## 2. Create least-privilege S3 credentials
 
-In Cloudflare R2, create an API token with **Object Read & Write** permission and scope it to the three selected buckets. Record the **Access Key ID** and **Secret Access Key** when Cloudflare displays them; the secret is shown once.
+In Cloudflare R2, create an API token with **Object Read & Write** permission and scope it to the three regional
+buckets. Record the **Access Key ID** and **Secret Access Key** when Cloudflare displays them; the secret is shown
+once.
 
 One token can cover all three buckets:
 
@@ -40,6 +44,13 @@ R2_XSMN_ENDPOINT_URL=<only-if-an-explicit-endpoint-is-required>
 ```
 
 Blank XSMN/XSMT overrides fall back to the shared account and credentials. The standard endpoint is derived as `https://<account-id>.r2.cloudflarestorage.com`, and the S3 region is `auto`.
+
+For production release backup, create a second **Object Read & Write** token scoped only to the backup bucket and
+configure `R2_BACKUP_BUCKET_NAME`, `R2_BACKUP_ACCOUNT_ID`, `R2_BACKUP_ACCESS_KEY_ID`, and
+`R2_BACKUP_SECRET_ACCESS_KEY`. `R2_BACKUP_ENDPOINT_URL` is optional because it can be derived from the account ID.
+The application can fall back to the primary connection when every override is blank, but then the primary token
+must explicitly include the backup bucket as a fourth bucket. The scheduled DR workflow deliberately requires the
+dedicated credential set so a primary-token failure does not remove the backup failure domain.
 
 Never put credentials in source, documentation, screenshots, fixtures, shell history, or command output. `.env` is ignored by Git.
 
@@ -67,7 +78,9 @@ uv run lottery-etl run \
   --fixture tests/fixtures/valid-xsmt-result-page.html
 ```
 
-Confirm all three buckets independently contain Bronze, monthly Silver, Gold CSV/Parquet, quality, run manifests, a snapshot manifest, and `manifests/latest.json`. The XSMN/XSMT buckets should also contain `gold/latest/dim-station.*`.
+Confirm all three buckets independently contain Bronze, monthly Silver, immutable Gold Parquet under
+`gold/releases/run-id=<run>/`, quality, run manifests, an immutable snapshot manifest, `control/latest.json`, and
+`manifests/latest.json`. XSMN/XSMT releases must include `dim-station.parquet`.
 
 Fixture runs use `test_fixture` lineage. Do not use a fixture to seed production history.
 
@@ -81,6 +94,11 @@ Under repository Settings → Secrets and variables → Actions, create:
 - `R2_BUCKET_NAME`
 - `R2_XSMN_BUCKET_NAME`
 - `R2_XSMT_BUCKET_NAME`
+- `R2_BACKUP_BUCKET_NAME`
+- `R2_BACKUP_ACCOUNT_ID`
+- `R2_BACKUP_ACCESS_KEY_ID`
+- `R2_BACKUP_SECRET_ACCESS_KEY`
+- `R2_BACKUP_ENDPOINT_URL` only when an explicit endpoint is required
 
 Only add optional `R2_XSMN_*` or `R2_XSMT_*` secrets when using a separate regional account/token. Optional repository variables include the public base URLs, fallback source URLs, and `SOURCE_BASE_URL`.
 
@@ -88,21 +106,29 @@ Only add optional `R2_XSMN_*` or `R2_XSMT_*` secrets when using a separate regio
 
 CI never receives production secrets. The scheduled/manual daily workflow receives them and has read-only repository permissions.
 
-## 5. Publish curated Gold only
+## 5. Publish curated serving data only
 
-Keep Bronze, Silver, quality reports, and manifests private. Route only the intended Gold objects through custom domains, for example:
+Keep Bronze, Silver, quality reports, ControlState, run manifests, and snapshot manifests private. Daily Gold paths
+contain a run ID and are immutable. The weekly job converts the manifest-selected Parquet release into immutable CSV
+and then publishes `exports/csv/latest.json`. A curated read-only router may expose only `manifests/latest.json` or
+`exports/csv/latest.json` plus the immutable objects referenced by that pointer; otherwise consumers resolve the
+pointer through authenticated access. Example public CSV routes:
 
 ```text
-https://data.example.com/xsmb/gold/latest/fact-loto-daily.csv
-https://data.example.com/xsmn/gold/latest/fact-loto-daily.csv
-https://data.example.com/xsmt/gold/latest/fact-loto-daily.csv
+https://data.example.com/xsmb/exports/csv/run-id=<run>/fact-loto-daily.csv
+https://data.example.com/xsmn/exports/csv/run-id=<run>/fact-loto-daily.csv
+https://data.example.com/xsmt/exports/csv/run-id=<run>/fact-loto-daily.csv
 ```
 
 Ensure every route targets the correct bucket. Do not use expiring presigned URLs for long-term BI scheduled refresh.
 
 ## 6. Activate the schedule
 
-Run `Daily Vietnam Lottery ETL` manually with `region=all` and a known date. Verify all three Action results, latest manifests, listed checksums, and public CSV routes. The cron queues at 18:17 Asia/Ho_Chi_Minh, and a gate job holds scheduled extraction until the safe 18:35 draw cutoff.
+Run `Daily Vietnam Lottery ETL` manually with `region=all` and a known date. Verify all three Action results, latest
+manifests, and checksums. Run `Export Lottery CSV Snapshots` once before enabling BI refresh. Run `Backup Published
+Lottery Releases` and retain its backup/restore/status artifact. The restore drill is deliberately consumer-only:
+it restores Gold/manifests/control into an isolated local lake, writes `recovery/consumer-only.json`, and blocks ETL
+because Bronze/Silver are not part of this release backup.
 
 ## Troubleshooting S3 signatures
 

@@ -28,6 +28,14 @@ test("server-renders the branded analytics shell", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /<title>Lôtô Lab — Vietnam Lottery Analytics<\/title>/i);
+  assert.match(
+    html,
+    /<meta property="og:image" content="https:\/\/loto-lab-vietnam\.nmt17092006\.chatgpt\.site\/og\.png"/i,
+  );
+  assert.match(
+    html,
+    /<meta name="twitter:image" content="https:\/\/loto-lab-vietnam\.nmt17092006\.chatgpt\.site\/og\.png"/i,
+  );
   assert.match(html, /Đang nạp dữ liệu mô hình/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/);
 });
@@ -42,6 +50,10 @@ test("ships all three serving-schema demo datasets and removes the starter previ
   ]);
   assert.match(page, /MODEL LAB/);
   assert.match(page, /backtest/i);
+  assert.match(page, /RESULT EXPLORER/);
+  assert.match(page, /\/api\/v2\/results/);
+  assert.match(page, /Tra kết quả/);
+  assert.match(page, /ANALYTICS_MODEL_VERSION/);
   assert.match(page, /không phải dự báo xác suất trúng/i);
   assert.match(page, /LOTTERY_REGIONS/);
   assert.match(layout, /lang="vi"/);

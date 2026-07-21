@@ -10,6 +10,8 @@ from zoneinfo import ZoneInfo
 
 from xsmb_etl.config import EtlEnvironment, Settings
 from xsmb_etl.control import DrawStatus
+from xsmb_etl.csv_export import export_latest_gold_csv
+from xsmb_etl.disaster_recovery import backup_latest_release, restore_latest_release
 from xsmb_etl.extract import ExtractedResult, ResultExtractor, parse_result_page
 from xsmb_etl.history_audit import DEFAULT_START_DATES, HistoryAuditReport, audit_history
 from xsmb_etl.lake_status import LakeStatus, inspect_lake
@@ -126,6 +128,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             paths.extend(repository.download_gold(destination))
         print(_json_list(str(path) for path in paths))
         return 0
+    if args.command == 'export-csv':
+        regions = _regions(args.region)
+        manifests = []
+        for region in regions:
+            repository = _repository_for_args(settings, args, region, multiple=len(regions) > 1)
+            manifests.append(export_latest_gold_csv(repository))
+        _print_models(manifests, collapse_single=True)
+        return 0
+    if args.command == 'backup-release':
+        regions = _regions(args.region)
+        backup_store = _backup_store(settings, args)
+        evidence = []
+        for region in regions:
+            repository = _repository_for_args(settings, args, region, multiple=len(regions) > 1)
+            evidence.append(backup_latest_release(repository.store, backup_store, region=region))
+        _print_models(evidence, collapse_single=True)
+        return 0
+    if args.command == 'restore-release':
+        uses_primary_r2 = args.storage == 'r2' or (
+            args.storage is None and args.output is None and settings.etl_env is EtlEnvironment.PRODUCTION
+        )
+        if uses_primary_r2:
+            parser.error(
+                'restore-release restores a consumer-only Gold boundary and cannot target the primary ETL R2 lake; '
+                'use --storage local with an isolated output directory'
+            )
+        regions = _regions(args.region)
+        backup_store = _backup_store(settings, args)
+        evidence = []
+        for region in regions:
+            repository = _repository_for_args(settings, args, region, multiple=len(regions) > 1)
+            evidence.append(restore_latest_release(backup_store, repository.store, region=region))
+        _print_models(evidence, collapse_single=True)
+        return 0
     if args.command == 'migrate-legacy':
         repository = _repository(
             settings,
@@ -195,6 +231,22 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_storage_options(download)
     download.add_argument('--download-output', type=Path, required=True)
 
+    csv_export = subparsers.add_parser('export-csv', help='materialize CSV files for the current Gold release')
+    _add_storage_options(csv_export)
+
+    backup = subparsers.add_parser('backup-release', help='copy the published Gold boundary to backup storage')
+    _add_storage_options(backup)
+    _add_backup_storage_options(backup)
+
+    restore = subparsers.add_parser('restore-release', help='restore and verify the latest backed-up Gold boundary')
+    _add_storage_options(restore)
+    _add_backup_storage_options(restore)
+    restore.add_argument(
+        '--confirm-primary-overwrite',
+        action='store_true',
+        help=argparse.SUPPRESS,
+    )
+
     migrate = subparsers.add_parser('migrate-legacy', help='migrate the historical wide JSON dataset')
     _add_storage_options(migrate, include_region=False)
     migrate.add_argument('--input', type=Path, default=Path('data/xsmb.json'))
@@ -217,6 +269,24 @@ def _add_storage_options(parser: argparse.ArgumentParser, *, include_region: boo
             help='data lake to operate on; defaults to xsmb',
         )
     parser.add_argument('--output', type=Path, help='local object-store root; region defaults are used when omitted')
+
+
+def _add_backup_storage_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument('--backup-storage', choices=('local', 'r2'), default='local')
+    parser.add_argument('--backup-output', type=Path, default=Path('backup'))
+
+
+def _backup_store(settings: Settings, args) -> LocalObjectStore | R2ObjectStore:
+    if args.backup_storage == 'r2':
+        if not settings.r2_backup_bucket_name:
+            raise ValueError('R2_BACKUP_BUCKET_NAME is required for R2 backup storage')
+        return R2ObjectStore(
+            settings,
+            region=LotteryRegion.XSMB,
+            bucket_name=settings.r2_backup_bucket_name,
+            use_backup_credentials=True,
+        )
+    return LocalObjectStore(args.backup_output)
 
 
 def _repository(

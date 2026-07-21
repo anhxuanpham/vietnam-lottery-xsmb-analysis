@@ -197,8 +197,13 @@ def test_audit_history_validates_exact_xsmn_station_calendar_and_dimension(tmp_p
 
 def test_audit_history_reports_corrupt_manifest_referenced_gold(tmp_path, grouped_prize_values) -> None:
     repository, draw_date = _xsmb_repository(tmp_path, grouped_prize_values)
+    fact_key = next(
+        reference.key
+        for reference in repository.latest_manifest().objects
+        if reference.key.endswith('/fact-draw-result.parquet')
+    )
     repository.store.put_bytes(
-        'gold/latest/fact-draw-result.parquet',
+        fact_key,
         b'changed after publication',
         content_type='application/vnd.apache.parquet',
     )

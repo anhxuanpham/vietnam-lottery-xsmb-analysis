@@ -28,7 +28,10 @@ MODULE_SPEC.loader.exec_module(EXPORTER)
 FACT_DRAW_RESULT_KEY = EXPORTER.FACT_DRAW_RESULT_KEY
 ServingDataError = EXPORTER.ServingDataError
 build_serving_payload = EXPORTER.build_serving_payload
+build_serving_v2_bundle = EXPORTER.build_serving_v2_bundle
 main = EXPORTER.main
+serving_v2_shard_key = EXPORTER.serving_v2_shard_key
+write_serving_v2_bundle = EXPORTER.write_serving_v2_bundle
 
 FIXTURE = Path(__file__).parent / 'fixtures' / 'valid-xsmn-result-page.html'
 GENERATED_AT = datetime(2026, 7, 19, 6, 30, tzinfo=UTC)
@@ -129,8 +132,13 @@ def test_build_serving_payload_exports_station_metadata_and_recent_draws(tmp_pat
 
 def test_export_rejects_gold_object_that_no_longer_matches_manifest(tmp_path, grouped_prize_values) -> None:
     repository = _xsmb_repository(tmp_path, grouped_prize_values)
+    fact_key = next(
+        reference.key
+        for reference in repository.latest_manifest().objects
+        if reference.key.endswith(f'/{FACT_DRAW_RESULT_KEY}')
+    )
     repository.store.put_bytes(
-        FACT_DRAW_RESULT_KEY,
+        fact_key,
         b'not the published object',
         content_type='application/vnd.apache.parquet',
     )
@@ -164,3 +172,119 @@ def test_main_writes_requested_local_output(tmp_path, grouped_prize_values, monk
     assert payload['region'] == 'xsmb'
     assert summary['output'] == str(destination)
     assert summary['datasetVersion'] == 'run-xsmb'
+
+
+def test_build_serving_v2_bundle_uses_immutable_station_year_shards(tmp_path, grouped_prize_values) -> None:
+    repository = _xsmb_repository(tmp_path, grouped_prize_values)
+
+    bundle = build_serving_v2_bundle(repository, LotteryRegion.XSMB, generated_at=GENERATED_AT)
+
+    assert bundle.metadata_key == 'v2/regions/xsmb/latest.json'
+    assert bundle.metadata['schemaVersion'] == 2
+    assert bundle.metadata['releaseId'] == 'run-xsmb'
+    assert bundle.metadata['source'] == 'r2'
+    assert bundle.metadata['stations'][0]['years'] == [2026]
+    assert len(json.dumps(bundle.metadata).encode()) < 100 * 1024
+
+    expected_key = serving_v2_shard_key('run-xsmb', LotteryRegion.XSMB, 'xsmb', 2026)
+    assert set(bundle.shards) == {expected_key}
+    shard = bundle.shards[expected_key]
+    assert shard['releaseId'] == 'run-xsmb'
+    assert shard['station'] == {'code': 'xsmb', 'name': 'Miền Bắc'}
+    assert shard['range'] == {'from': '2026-07-18', 'to': '2026-07-19'}
+    assert shard['drawCount'] == 2
+    assert all(draw['numbers'][0] == draw['specialTail'] for draw in shard['draws'])
+
+
+def test_write_serving_v2_bundle_writes_latest_metadata_after_shards(tmp_path, grouped_prize_values) -> None:
+    repository = _xsmb_repository(tmp_path / 'lake', grouped_prize_values)
+    bundle = build_serving_v2_bundle(repository, LotteryRegion.XSMB, generated_at=GENERATED_AT)
+
+    write_serving_v2_bundle(bundle, tmp_path / 'serving')
+
+    metadata_path = tmp_path / 'serving' / bundle.metadata_key
+    assert json.loads(metadata_path.read_text())['releaseId'] == 'run-xsmb'
+    for key, expected in bundle.shards.items():
+        assert json.loads((tmp_path / 'serving' / key).read_text()) == expected
+
+
+def test_main_can_export_only_the_v2_bundle(tmp_path, grouped_prize_values, monkeypatch, capsys) -> None:
+    lake_root = tmp_path / 'lake'
+    destination = tmp_path / 'serving'
+    _xsmb_repository(lake_root, grouped_prize_values)
+    monkeypatch.setenv('ETL_ENV', 'test')
+
+    assert (
+        main(
+            [
+                '--storage',
+                'local',
+                '--region',
+                'xsmb',
+                '--lake-root',
+                str(lake_root),
+                '--v2-output-dir',
+                str(destination),
+            ]
+        )
+        == 0
+    )
+
+    summary = json.loads(capsys.readouterr().out)
+    assert summary['v2MetadataKey'] == 'v2/regions/xsmb/latest.json'
+    assert summary['v2ObjectCount'] == 2
+    assert summary['datasetVersion'] == 'run-xsmb'
+
+
+def test_main_aborts_combined_export_if_publication_changes_mid_build(
+    tmp_path,
+    grouped_prize_values,
+    monkeypatch,
+) -> None:
+    lake_root = tmp_path / 'lake'
+    destination = tmp_path / 'serving' / 'xsmb.json'
+    v2_destination = tmp_path / 'serving-v2'
+    repository = _xsmb_repository(lake_root, grouped_prize_values)
+    next_result = LotteryResult.from_prize_groups(
+        date(2026, 7, 20),
+        'https://example.test/20',
+        grouped_prize_values,
+    )
+    next_fact = draw_results_frame([next_result], 'run-xsmb-next')
+    next_objects = repository.write_gold_tables(
+        build_gold_tables(next_fact, run_id='run-xsmb-next'),
+        run_id='run-xsmb-next',
+    )
+    original_build = EXPORTER.build_serving_payload
+
+    def build_then_advance(*args, **kwargs):
+        payload = original_build(*args, **kwargs)
+        repository.publish_snapshot_and_latest(
+            run_id='run-xsmb-next',
+            target_date=next_result.draw_date,
+            gold_objects=next_objects,
+            published_at=datetime(2026, 7, 20, tzinfo=UTC),
+        )
+        return payload
+
+    monkeypatch.setattr(EXPORTER, 'build_serving_payload', build_then_advance)
+    monkeypatch.setenv('ETL_ENV', 'test')
+
+    with pytest.raises(ServingDataError, match='changed during export; no serving data was written'):
+        main(
+            [
+                '--storage',
+                'local',
+                '--region',
+                'xsmb',
+                '--lake-root',
+                str(lake_root),
+                '--output',
+                str(destination),
+                '--v2-output-dir',
+                str(v2_destination),
+            ]
+        )
+
+    assert not destination.exists()
+    assert not v2_destination.exists()

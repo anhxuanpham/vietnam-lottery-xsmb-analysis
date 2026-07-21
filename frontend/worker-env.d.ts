@@ -2,4 +2,5 @@
 interface Env {
   ASSETS: Fetcher;
   DASHBOARD_INGEST_TOKEN?: string;
+  ALERT_WEBHOOK_URL?: string;
 }

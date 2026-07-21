@@ -8,12 +8,14 @@ from pathlib import Path
 from uuid import uuid4
 
 from xsmb_etl.control import DrawStatus
+from xsmb_etl.gold_keys import is_gold_table_key, legacy_snapshot_manifest_key, snapshot_manifest_key
 from xsmb_etl.marts import build_gold_tables
 from xsmb_etl.models import LotteryResult, ResultList, legacy_result_to_groups
 from xsmb_etl.quality import build_quality_report, require_quality
 from xsmb_etl.repository import DataLakeRepository
 from xsmb_etl.run_models import (
     DataObjectReference,
+    LatestManifest,
     MigrationIssue,
     MigrationReport,
     PipelineRunResult,
@@ -36,18 +38,22 @@ class HistoricalMigrator:
         self.repository = repository
 
     def migrate(self, source_path: Path, *, force: bool = False) -> PipelineRunResult:
+        self.repository.require_etl_writable()
         previous = [
             manifest
             for manifest in self.repository.run_manifests()
             if manifest.source_lineage is SourceLineage.LEGACY_REPOSITORY_DATASET
             and manifest.status is RunStatus.SUCCESS
         ]
-        if previous and not force:
-            latest = previous[-1]
+        complete_previous = next(
+            (manifest for manifest in reversed(previous) if self._publication_is_complete(manifest)),
+            None,
+        )
+        if complete_previous is not None and not force:
             return PipelineRunResult(
-                run_id=latest.run_id,
-                target_date=latest.target_date,
-                status=latest.status.value,
+                run_id=complete_previous.run_id,
+                target_date=complete_previous.target_date,
+                status=complete_previous.status.value,
                 skipped=True,
                 message='legacy migration already completed; use --force to rebuild it',
             )
@@ -57,6 +63,7 @@ class HistoricalMigrator:
         objects: list[StoredObject] = []
         target_date = date.min
         quality_passed = False
+        publication_committed = False
         try:
             legacy = ResultList.model_validate_json(source_path.read_text(encoding='utf-8'))
             canonical, report = self._validate_rows(legacy, run_id)
@@ -86,7 +93,7 @@ class HistoricalMigrator:
             objects.extend(self.repository.replace_silver_draw_results(draw))
             objects.extend(self.repository.replace_silver_loto_daily(loto))
             objects.append(self.repository.write_quality_report(quality, target_date))
-            gold_objects = self.repository.write_gold_tables(gold_tables, run_id=run_id)
+            gold_objects = self.repository.write_gold_tables(gold_tables, run_id=run_id, formats=('parquet',))
             objects.extend(gold_objects)
             manifest = RunManifest(
                 run_id=run_id,
@@ -100,13 +107,16 @@ class HistoricalMigrator:
                 covered_dates=tuple(result.draw_date for result in canonical),
                 objects=tuple(DataObjectReference.from_stored(item) for item in objects),
             )
-            objects.append(self.repository.write_run_manifest(manifest))
+            objects.append(self.repository.write_run_manifest(manifest, update_control=False))
             snapshot, latest = self.repository.publish_snapshot_and_latest(
                 run_id=run_id,
                 target_date=target_date,
                 gold_objects=gold_objects,
+                published_at=manifest.completed_at,
             )
             objects.extend([snapshot, latest])
+            publication_committed = True
+            self.repository.publish_manifest_control_state(manifest)
             return PipelineRunResult(
                 run_id=run_id,
                 target_date=target_date,
@@ -115,6 +125,8 @@ class HistoricalMigrator:
                 message=f'migrated {len(canonical)} historical draw dates',
             )
         except Exception as exc:
+            if publication_committed:
+                raise
             failure_manifest = RunManifest(
                 run_id=run_id,
                 target_date=target_date,
@@ -133,6 +145,37 @@ class HistoricalMigrator:
             except Exception:
                 pass
             raise
+
+    def _publication_is_complete(self, manifest: RunManifest) -> bool:
+        run_gold = tuple(reference for reference in manifest.objects if is_gold_table_key(reference.key))
+        if not run_gold:
+            return False
+        versioned = all(reference.key.startswith(f'gold/releases/run-id={manifest.run_id}/') for reference in run_gold)
+        snapshot_key = (
+            snapshot_manifest_key(manifest.target_date, manifest.run_id)
+            if versioned
+            else legacy_snapshot_manifest_key(manifest.target_date)
+        )
+        try:
+            snapshot = LatestManifest.model_validate_json(self.repository.store.get_bytes(snapshot_key))
+            if (
+                snapshot.run_id != manifest.run_id
+                or snapshot.target_date != manifest.target_date
+                or sorted(_reference_signature(reference) for reference in run_gold)
+                != sorted(_reference_signature(reference) for reference in snapshot.objects)
+            ):
+                return False
+        except Exception:
+            return False
+        latest = self.repository.latest_manifest()
+        if latest is None or latest.target_date < manifest.target_date:
+            return False
+        if latest.run_id != manifest.run_id:
+            # A later successful publication supersedes this immutable migration
+            # snapshot; rerunning the destructive replace would remove newer days.
+            return True
+        state = self.repository.control_state()
+        return all(state.status_for(draw_date) is DrawStatus.SUCCESS for draw_date in manifest.covered_dates)
 
     @staticmethod
     def _validate_rows(legacy: ResultList, run_id: str) -> tuple[list[LotteryResult], MigrationReport]:
@@ -184,3 +227,13 @@ class HistoricalMigrator:
             )
             for offset in range((report.maximum_date - report.minimum_date).days + 1)
         }
+
+
+def _reference_signature(reference: DataObjectReference) -> tuple[str, int, str, str, str | None]:
+    return (
+        reference.key,
+        reference.size,
+        reference.sha256,
+        reference.content_type,
+        reference.cache_control,
+    )

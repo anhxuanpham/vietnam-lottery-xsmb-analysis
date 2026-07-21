@@ -15,6 +15,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, computed_field
 
 from xsmb_etl.control import DrawStatus
+from xsmb_etl.gold_keys import gold_filename
 from xsmb_etl.lake_status import Repository, inspect_lake
 from xsmb_etl.models import EXPECTED_RESULT_COUNT, PRIZE_SPECS
 from xsmb_etl.run_models import DataObjectReference, LatestManifest, LotteryRegion
@@ -37,10 +38,10 @@ DRAW_CUTOFFS: dict[LotteryRegion, time] = {
     LotteryRegion.XSMB: time(18, 35),
 }
 
-DIM_DATE_KEY = 'gold/latest/dim-date.parquet'
-FACT_DRAW_RESULT_KEY = 'gold/latest/fact-draw-result.parquet'
-FACT_LOTO_DAILY_KEY = 'gold/latest/fact-loto-daily.parquet'
-DIM_STATION_KEY = 'gold/latest/dim-station.parquet'
+DIM_DATE_KEY = 'dim-date.parquet'
+FACT_DRAW_RESULT_KEY = 'fact-draw-result.parquet'
+FACT_LOTO_DAILY_KEY = 'fact-loto-daily.parquet'
+DIM_STATION_KEY = 'dim-station.parquet'
 
 _STATION_REGIONS = frozenset({LotteryRegion.XSMN, LotteryRegion.XSMT})
 _STATION_CODE_PATTERN = re.compile(r'^[A-Z0-9]{2,8}$')
@@ -108,16 +109,8 @@ def audit_history(
 
     issues: list[HistoryAuditIssue] = []
 
-    # Publication metadata is deliberately the first lake operation.  It catches
-    # a broken consumer boundary before any potentially large Gold download.
-    lake_status = inspect_lake(repository)
-    for message in lake_status.issues:
-        _add_issue(
-            issues,
-            'lake-publication-invalid',
-            message,
-        )
-
+    # Capture the mutable pointer exactly once. All remaining reads are resolved
+    # from this immutable boundary even if a newer release publishes mid-audit.
     latest = _load_latest_manifest(repository, issues)
     if latest is None:
         return _report(
@@ -128,7 +121,15 @@ def audit_history(
             issues=issues,
         )
 
-    references = _references_by_key(latest, issues)
+    lake_status = inspect_lake(repository, latest_manifest=latest)
+    for message in lake_status.issues:
+        _add_issue(
+            issues,
+            'lake-publication-invalid',
+            message,
+        )
+
+    references = _references_by_filename(latest, issues)
     required_keys = [DIM_DATE_KEY, FACT_DRAW_RESULT_KEY, FACT_LOTO_DAILY_KEY]
     if repository.region in _STATION_REGIONS:
         required_keys.append(DIM_STATION_KEY)
@@ -198,6 +199,9 @@ def _latest_completed_date(region: LotteryRegion, *, now: datetime | None) -> da
 
 def _load_latest_manifest(repository: Repository, issues: list[HistoryAuditIssue]) -> LatestManifest | None:
     key = 'manifests/latest.json'
+    if not repository.store.exists(key):
+        _add_issue(issues, 'latest-manifest-missing', f'{key} is missing')
+        return None
     try:
         payload = repository.store.get_bytes(key)
     except ObjectNotFoundError:
@@ -216,17 +220,20 @@ def _load_latest_manifest(repository: Repository, issues: list[HistoryAuditIssue
         return None
 
 
-def _references_by_key(
+def _references_by_filename(
     latest: LatestManifest,
     issues: list[HistoryAuditIssue],
 ) -> dict[str, DataObjectReference]:
     references: dict[str, DataObjectReference] = {}
     duplicate_keys: list[str] = []
     for reference in latest.objects:
-        if reference.key in references:
-            duplicate_keys.append(reference.key)
+        filename = gold_filename(reference.key)
+        if filename is None:
             continue
-        references[reference.key] = reference
+        if filename in references:
+            duplicate_keys.append(filename)
+            continue
+        references[filename] = reference
     if duplicate_keys:
         unique_duplicates = sorted(set(duplicate_keys))
         _add_issue(
@@ -234,7 +241,7 @@ def _references_by_key(
             'gold-reference-duplicate',
             'latest manifest contains duplicate Gold references',
             count=len(unique_duplicates),
-            details={'keys': unique_duplicates},
+            details={'filenames': unique_duplicates},
         )
     return references
 
@@ -242,18 +249,20 @@ def _references_by_key(
 def _read_verified_parquet(
     repository: Repository,
     references: dict[str, DataObjectReference],
-    key: str,
+    filename: str,
     issues: list[HistoryAuditIssue],
 ) -> pd.DataFrame | None:
-    reference = references.get(key)
+    reference = references.get(filename)
     if reference is None:
         _add_issue(
             issues,
             'gold-reference-missing',
-            f'latest manifest does not reference required object {key}',
-            details={'key': key},
+            f'latest manifest does not reference required object {filename}',
+            details={'filename': filename},
         )
         return None
+
+    key = reference.key
 
     try:
         payload = repository.store.get_bytes(key)

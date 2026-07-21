@@ -32,6 +32,10 @@ const localBindingConfig = {
       ]
     : [],
   images: { binding: "IMAGES" },
+  triggers: {
+    // Independent Cloudflare watchdog from 20:00 through 22:45 Vietnam time.
+    crons: ["*/15 13-15 * * *"],
+  },
 };
 
 export default defineConfig(async () => {

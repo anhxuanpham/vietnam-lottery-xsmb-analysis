@@ -80,7 +80,8 @@ def test_southern_pipeline_publishes_independent_latest_and_skips_repeat(tmp_pat
     assert first.region is LotteryRegion.XSMN
     assert first.status == 'success'
     assert repository.latest_manifest().region is LotteryRegion.XSMN
-    assert len(list((tmp_path / 'gold/latest').glob('*'))) == 12
+    assert len(repository.latest_manifest().objects) == 6
+    assert all(reference.key.startswith('gold/releases/run-id=') for reference in repository.latest_manifest().objects)
     assert second.skipped
     assert extractor.calls == 1
 
@@ -158,7 +159,7 @@ def test_southern_backfill_publishes_gold_once_after_ingesting_the_batch(tmp_pat
     assert all('published batch dataset version' in result.message for result in results)
     assert extractor.calls == 3
     assert store.writes.count('manifests/latest.json') == 1
-    assert len([key for key in store.writes if key.startswith('gold/latest/')]) == 12
+    assert len([key for key in store.writes if key.startswith('gold/releases/')]) == 6
     assert repository.read_all_silver_draw_results().shape == (162, 15)
     assert [repository.control_state().status_for(value).value for value in dates] == [
         'success',

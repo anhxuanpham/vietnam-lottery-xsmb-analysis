@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from datetime import date
+from io import BytesIO
 
+import pandas as pd
 import pytest
 
 from xsmb_etl.extract import ExtractedResult, NoDrawSourcePageError, SourcePageError
@@ -99,7 +101,7 @@ def test_backfill_records_each_outcome_and_continues_after_failure(
     valid_result_page: bytes,
     grouped_prize_values: dict[str, list[str]],
 ) -> None:
-    dates = [date(2026, 7, 14), date(2026, 7, 15), date(2026, 7, 16)]
+    dates = [date(2026, 7, 14), date(2026, 7, 15), date(2026, 7, 16), date(2026, 7, 17)]
 
     class BackfillExtractor:
         def extract(self, selected_date: date) -> ExtractedResult:
@@ -110,19 +112,124 @@ def test_backfill_records_each_outcome_and_continues_after_failure(
             result = LotteryResult.from_prize_groups(selected_date, 'https://example.test', grouped_prize_values)
             return ExtractedResult(valid_result_page, result)
 
-    repository = DataLakeRepository(LocalObjectStore(tmp_path), gold_cache_control='no-cache')
+    store = RecordingStore(tmp_path)
+    repository = DataLakeRepository(store, gold_cache_control='no-cache')
     pipeline = Pipeline(repository, BackfillExtractor())
 
     results = pipeline.backfill(dates[0], dates[-1])
 
-    assert [result.status for result in results] == ['no_draw', 'failed', 'success']
+    assert [result.status for result in results] == ['no_draw', 'failed', 'success', 'success']
     assert 'backfill continued' in results[1].message
+    assert all('published batch dataset version' in result.message for result in results[2:])
+    assert store.writes.count('manifests/latest.json') == 1
     assert repository.latest_manifest().target_date == dates[-1]
     assert [repository.control_state().status_for(value).value for value in dates] == [
         'no_draw',
         'failed',
         'success',
+        'success',
     ]
+
+
+def test_backfill_republishes_gold_when_only_new_outcome_is_no_draw(
+    tmp_path,
+    valid_result_page: bytes,
+    grouped_prize_values: dict[str, list[str]],
+) -> None:
+    first_date = date(2026, 7, 16)
+    no_draw_date = date(2026, 7, 17)
+    latest_date = date(2026, 7, 18)
+
+    class HistoricalExtractor:
+        def extract(self, selected_date: date) -> ExtractedResult:
+            if selected_date == no_draw_date:
+                raise NoDrawSourcePageError(selected_date, '', 'Source explicitly says không mở thưởng.')
+            result = LotteryResult.from_prize_groups(
+                selected_date,
+                'https://example.test',
+                grouped_prize_values,
+            )
+            return ExtractedResult(valid_result_page, result)
+
+    store = RecordingStore(tmp_path)
+    repository = DataLakeRepository(store, gold_cache_control='no-cache')
+    pipeline = Pipeline(repository, HistoricalExtractor())
+    pipeline.run(first_date)
+    pipeline.run(latest_date)
+    previous_run_id = repository.latest_manifest().run_id
+
+    results = pipeline.backfill(no_draw_date, no_draw_date)
+
+    assert [result.status for result in results] == ['no_draw']
+    assert repository.latest_manifest().run_id != previous_run_id
+    assert store.writes.count('manifests/latest.json') == 3
+    dim_date = pd.read_parquet(BytesIO(store.get_bytes('gold/latest/dim-date.parquet')))
+    status = dim_date.loc[pd.to_datetime(dim_date['date']).dt.date.eq(no_draw_date), 'draw_status'].item()
+    assert status == 'no_draw'
+
+
+def test_backfill_of_older_success_keeps_latest_target_and_publishes_once(
+    tmp_path,
+    valid_result_page: bytes,
+    grouped_prize_values: dict[str, list[str]],
+) -> None:
+    historical_date = date(2011, 4, 26)
+    latest_date = date(2026, 7, 20)
+
+    class HistoricalExtractor:
+        def extract(self, selected_date: date) -> ExtractedResult:
+            result = LotteryResult.from_prize_groups(
+                selected_date,
+                'https://example.test',
+                grouped_prize_values,
+            )
+            return ExtractedResult(valid_result_page, result)
+
+    store = RecordingStore(tmp_path)
+    repository = DataLakeRepository(store, gold_cache_control='no-cache')
+    pipeline = Pipeline(repository, HistoricalExtractor())
+    pipeline.run(latest_date)
+
+    results = pipeline.backfill(historical_date, historical_date)
+
+    assert [result.status for result in results] == ['success']
+    assert repository.latest_manifest().target_date == latest_date
+    assert store.writes.count('manifests/latest.json') == 2
+
+
+def test_backfill_recovers_no_draw_manifest_newer_than_gold_publication(
+    tmp_path,
+    valid_result_page: bytes,
+    grouped_prize_values: dict[str, list[str]],
+) -> None:
+    first_date = date(2026, 7, 16)
+    no_draw_date = date(2026, 7, 17)
+    latest_date = date(2026, 7, 18)
+
+    class HistoricalExtractor:
+        def extract(self, selected_date: date) -> ExtractedResult:
+            result = LotteryResult.from_prize_groups(
+                selected_date,
+                'https://example.test',
+                grouped_prize_values,
+            )
+            return ExtractedResult(valid_result_page, result)
+
+    store = RecordingStore(tmp_path)
+    repository = DataLakeRepository(store, gold_cache_control='no-cache')
+    pipeline = Pipeline(repository, HistoricalExtractor())
+    pipeline.run(first_date)
+    pipeline.run(latest_date)
+    pipeline.record_no_draw(no_draw_date, detail='Source explicitly says không mở thưởng.')
+    stale_run_id = repository.latest_manifest().run_id
+
+    results = pipeline.backfill(no_draw_date, no_draw_date)
+
+    assert results == []
+    assert repository.latest_manifest().run_id != stale_run_id
+    dim_date = pd.read_parquet(BytesIO(store.get_bytes('gold/latest/dim-date.parquet')))
+    status = dim_date.loc[pd.to_datetime(dim_date['date']).dt.date.eq(no_draw_date), 'draw_status'].item()
+    assert status == 'no_draw'
 
 
 def test_backfill_failure_result_does_not_make_a_second_repository_request() -> None:

@@ -142,11 +142,16 @@ def parse_result_page(raw_response: bytes, selected_date: date, source_url: str)
     if no_draw_notice is not None:
         raise NoDrawSourcePageError(selected_date, source_url, no_draw_notice)
 
-    groups: dict[str, list[str]] = {}
+    raw_groups: dict[PrizeGroup, list[str]] = {}
     container = result_container or soup
     for group, spec in PRIZE_SPECS.items():
         css_class = 'special-prize' if group is PrizeGroup.SPECIAL else group.value
-        values = [element.get_text(strip=True) for element in container.select(f'.{css_class}')]
+        raw_groups[group] = [element.get_text(strip=True) for element in container.select(f'.{css_class}')]
+
+    _repair_exact_prize5_prize6_transposition(raw_groups)
+    groups: dict[str, list[str]] = {}
+    for group, spec in PRIZE_SPECS.items():
+        values = raw_groups[group]
         if len(values) != spec.count:
             raise PrizeCountError(f'{group.value} expected {spec.count} values, got {len(values)}')
         groups[group.value] = values
@@ -195,3 +200,27 @@ def explicit_no_draw_notice(soup: BeautifulSoup) -> str | None:
     parent = text_node.parent
     notice = parent.get_text(' ', strip=True) if isinstance(parent, Tag) else str(text_node).strip()
     return re.sub(r'\s+', ' ', notice)[:500]
+
+
+def _repair_exact_prize5_prize6_transposition(raw_groups: dict[PrizeGroup, list[str]]) -> None:
+    """Repair the recognizable historical page where prize-5/6 CSS classes are exchanged."""
+
+    prize5 = raw_groups[PrizeGroup.PRIZE5]
+    prize6 = raw_groups[PrizeGroup.PRIZE6]
+    other_groups_are_complete = all(
+        len(raw_groups[group]) == spec.count
+        for group, spec in PRIZE_SPECS.items()
+        if group not in {PrizeGroup.PRIZE5, PrizeGroup.PRIZE6}
+    )
+    prize5_looks_like_prize6 = len(prize5) == PRIZE_SPECS[PrizeGroup.PRIZE6].count and all(
+        _is_ascii_width(value, PRIZE_SPECS[PrizeGroup.PRIZE6].width) for value in prize5
+    )
+    prize6_looks_like_prize5 = len(prize6) == PRIZE_SPECS[PrizeGroup.PRIZE5].count and all(
+        _is_ascii_width(value, PRIZE_SPECS[PrizeGroup.PRIZE5].width) for value in prize6
+    )
+    if other_groups_are_complete and prize5_looks_like_prize6 and prize6_looks_like_prize5:
+        raw_groups[PrizeGroup.PRIZE5], raw_groups[PrizeGroup.PRIZE6] = prize6, prize5
+
+
+def _is_ascii_width(value: str, width: int) -> bool:
+    return len(value) == width and value.isascii() and value.isdigit()

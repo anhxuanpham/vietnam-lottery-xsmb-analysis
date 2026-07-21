@@ -176,14 +176,126 @@ class Pipeline:
             raise
 
     def backfill(self, start_date: date, end_date: date, *, force: bool = False) -> list[PipelineRunResult]:
-        pending = self.repository.control_state().pending_dates(start_date, end_date, force=force)
-        results = []
+        control_state = self.repository.control_state()
+        pending = control_state.pending_dates(start_date, end_date, force=force)
+        results: list[PipelineRunResult] = []
+        successful_result_indexes: list[int] = []
+        latest = self.repository.latest_manifest()
+        publication_needed = latest is None or any(
+            record.updated_at > latest.published_at for record in control_state.records
+        )
         for target_date in pending:
             try:
-                results.append(self.run(target_date, force=force))
+                result = self._ingest_backfill_date(target_date, force=force)
+                results.append(result)
+                if result.status in {RunStatus.SUCCESS.value, RunStatus.NO_DRAW.value}:
+                    publication_needed = True
+                if result.status == RunStatus.SUCCESS.value:
+                    successful_result_indexes.append(len(results) - 1)
             except Exception as exc:
                 results.append(backfill_failure_result(self.repository, target_date, exc))
+
+        if publication_needed:
+            publication = self.build_gold()
+            for index in successful_result_indexes:
+                result = results[index]
+                results[index] = result.model_copy(
+                    update={
+                        'message': (
+                            f'ingested XSMB Silver for {result.target_date}; '
+                            f'published batch dataset version {publication.run_id}'
+                        )
+                    }
+                )
         return results
+
+    def _ingest_backfill_date(self, target_date: date, *, force: bool) -> PipelineRunResult:
+        """Validate and persist one XSMB date without rebuilding derived datasets."""
+
+        run_id = str(uuid4())
+        started_at = datetime.now(UTC)
+        objects: list[StoredObject] = []
+        quality_passed = False
+        try:
+            if self.repository.bronze_complete(target_date) and not force:
+                extracted = self.repository.load_bronze(target_date)
+                objects.extend(self.repository.bronze_objects(target_date))
+            else:
+                extracted = self.extractor.extract(target_date)
+                objects.extend(
+                    self.repository.write_bronze(
+                        extracted,
+                        run_id=run_id,
+                        force=force,
+                        fetched_at=datetime.now(UTC),
+                        source_lineage=self.source_lineage.value,
+                    )
+                )
+
+            current_draw = draw_results_frame([extracted.result], run_id)
+            current_loto = loto_daily_frame(current_draw, run_id=run_id)
+            current_gold = build_gold_tables(current_draw, run_id=run_id)
+            report = build_quality_report(
+                [extracted.result],
+                current_draw,
+                current_loto,
+                run_id=run_id,
+                gold_tables=current_gold,
+                today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
+            )
+            require_quality(report)
+            quality_passed = True
+            objects.extend(self.repository.upsert_silver_draw_results(current_draw))
+            return PipelineRunResult(
+                run_id=run_id,
+                region=self.repository.region,
+                target_date=target_date,
+                status=RunStatus.SUCCESS.value,
+                object_count=len(objects),
+                message=f'ingested validated XSMB Silver for {target_date}; awaiting batch publication',
+            )
+        except NoDrawSourcePageError as exc:
+            manifest = RunManifest(
+                run_id=run_id,
+                region=self.repository.region,
+                target_date=target_date,
+                status=RunStatus.NO_DRAW,
+                source_lineage=self.source_lineage,
+                started_at=started_at,
+                completed_at=datetime.now(UTC),
+                forced=force,
+                objects=tuple(DataObjectReference.from_stored(item) for item in objects),
+                error_message=exc.notice,
+            )
+            objects.append(self.repository.write_run_manifest(manifest))
+            return PipelineRunResult(
+                run_id=run_id,
+                region=self.repository.region,
+                target_date=target_date,
+                status=RunStatus.NO_DRAW.value,
+                object_count=len(objects),
+                message=exc.notice,
+            )
+        except Exception as exc:
+            manifest = RunManifest(
+                run_id=run_id,
+                region=self.repository.region,
+                target_date=target_date,
+                status=RunStatus.FAILED,
+                source_lineage=self.source_lineage,
+                started_at=started_at,
+                completed_at=datetime.now(UTC),
+                forced=force,
+                quality_passed=quality_passed,
+                objects=tuple(DataObjectReference.from_stored(item) for item in objects),
+                error_type=type(exc).__name__,
+                error_message=_safe_error_message(exc),
+            )
+            try:
+                self.repository.write_run_manifest(manifest)
+            except Exception:
+                pass
+            raise
 
     def record_no_draw(self, target_date: date, *, detail: str) -> PipelineRunResult:
         run_id = str(uuid4())

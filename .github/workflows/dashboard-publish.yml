@@ -16,7 +16,7 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       ETL_ENV: production
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -67,6 +67,7 @@ jobs:
         run: uv sync --frozen --no-dev
 
       - name: Verify published Gold metadata
+        id: metadata
         if: steps.config.outputs.ready == 'true'
         shell: bash
         run: |
@@ -77,11 +78,29 @@ jobs:
           else
             expected_date="$(TZ=Asia/Ho_Chi_Minh date +%F)"
           fi
+          echo "expected_date=$expected_date" >> "$GITHUB_OUTPUT"
           jq --exit-status --arg expected_date "$expected_date" \
             'all(.[]; .target_date == $expected_date)' \
             lake-status.json >/dev/null
 
+      - name: Audit complete published history
+        id: history_audit
+        if: >-
+          always() &&
+          !cancelled() &&
+          steps.config.outputs.ready == 'true' &&
+          steps.metadata.outputs.expected_date != ''
+        shell: bash
+        run: |
+          set -o pipefail
+          uv run lottery-etl audit-history \
+            --storage r2 \
+            --region all \
+            --to "${{ steps.metadata.outputs.expected_date }}" \
+            --json | tee history-audit.json
+
       - name: Export and publish compact payloads
+        id: publish_payloads
         if: steps.config.outputs.ready == 'true'
         shell: bash
         run: |
@@ -113,6 +132,17 @@ jobs:
               "${DASHBOARD_INGEST_URL}?region=${region}"
           done
 
+      - name: Upload publication health evidence
+        if: always() && steps.config.outputs.ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lottery-audit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            lake-status.json
+            history-audit.json
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Write job summary
         if: always()
         shell: bash
@@ -120,8 +150,30 @@ jobs:
           echo "### Lottery dashboard publish" >> "$GITHUB_STEP_SUMMARY"
           if [[ "${{ steps.config.outputs.ready }}" != "true" ]]; then
             echo "Skipped: dashboard ingest has not been configured." >> "$GITHUB_STEP_SUMMARY"
-          elif [[ "${{ job.status }}" == "success" ]]; then
-            echo "Published compact XSMB, XSMN, and XSMT payloads." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Dashboard publishing failed. Inspect the export/upload step." >> "$GITHUB_STEP_SUMMARY"
+            if [[ -s lake-status.json ]] && jq empty lake-status.json >/dev/null 2>&1; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "#### Metadata gate" >> "$GITHUB_STEP_SUMMARY"
+              jq -r '.[] | "- \(.region | ascii_upcase): healthy=\(.healthy), target=\(.target_date)"' \
+                lake-status.json >> "$GITHUB_STEP_SUMMARY"
+            fi
+            if [[ -s history-audit.json ]] && jq empty history-audit.json >/dev/null 2>&1; then
+              echo "" >> "$GITHUB_STEP_SUMMARY"
+              echo "#### Complete-history audit" >> "$GITHUB_STEP_SUMMARY"
+              jq -r 'to_entries[] | "- \(.key | ascii_upcase): healthy=\(.value.healthy), range=\(.value.from_date)..\(.value.to_date), statuses=[\(.value.status_counts | to_entries | map("\(.key)=\(.value)") | join(", "))], findings=\(.value.issues | length)"' \
+                history-audit.json >> "$GITHUB_STEP_SUMMARY"
+              jq -r 'to_entries[] | .key as $region | .value.issues[]? | "- \($region | ascii_upcase) \(.severity | ascii_upcase) \(.code): \(.message)"' \
+                history-audit.json >> "$GITHUB_STEP_SUMMARY"
+            fi
+
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "${{ steps.metadata.outcome }}" == "failure" ]]; then
+              echo "Publishing blocked by the Gold metadata gate." >> "$GITHUB_STEP_SUMMARY"
+            elif [[ "${{ steps.history_audit.outcome }}" == "failure" ]]; then
+              echo "Publishing blocked by the complete-history audit." >> "$GITHUB_STEP_SUMMARY"
+            elif [[ "${{ steps.publish_payloads.outcome }}" == "success" ]]; then
+              echo "Published compact XSMB, XSMN, and XSMT payloads." >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Dashboard publishing failed. Inspect the first failed workflow step." >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi

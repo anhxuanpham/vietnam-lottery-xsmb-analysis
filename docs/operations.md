@@ -35,6 +35,8 @@ For XSMT, dispatch `xsmt-backfill.yml` with `from_year=2018`. It uses the same r
 
 Historical backfill never requests the current Vietnam date. A current-year batch ends at yesterday, while `daily-etl.yml` owns today's result after the scheduled draw publication window. On January 1, the current-year historical batch exits successfully with no dates instead of requesting an incomplete draw.
 
+For a bounded XSMB repair, dispatch `xsmb-gap-repair.yml`. It shares `vietnam-lottery-xsmb` concurrency with Daily, rejects the current/future Vietnam date, never passes `--force`, publishes once, audits the requested range, and uploads the repair/audit JSON for 30 days. The optional legacy classification is limited to four 2006–2007 dates whose absence is corroborated by two independent historical archives; it is not described as an official source notice.
+
 If the source officially confirms there was no draw, record it explicitly in the affected lake:
 
 ```bash

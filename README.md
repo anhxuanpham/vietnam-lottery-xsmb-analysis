@@ -157,6 +157,7 @@ The audit starts at the first supported date for each lake (XSMB `2005-10-01`, X
 - `dashboard-publish.yml` runs at 19:47 Vietnam time, away from GitHub's top-of-hour scheduling hotspot. It validates healthy manifests against the 18:35 draw cutoff, exports compact station-grain JSON, and updates the private Sites serving bucket.
 - `xsmn-backfill.yml` runs resumable yearly XSMN batches from 2010 onward, one year at a time, and publishes Gold once per batch. The current-year batch stops at yesterday because the daily ETL owns today's draw after publication time.
 - `xsmt-backfill.yml` does the same for XSMT from 2018 onward using its own concurrency group and bucket.
+- `xsmb-gap-repair.yml` is a manual, bounded historical repair. It shares the XSMB daily concurrency group, never uses `--force`, publishes Gold once, audits the requested range, and retains its JSON evidence for 30 days.
 - The daily workflow has read-only repository permissions and writes generated data to R2 rather than committing it to Git.
 
 ## Legacy analysis

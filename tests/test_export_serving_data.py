@@ -196,6 +196,32 @@ def test_build_serving_v2_bundle_uses_immutable_station_year_shards(tmp_path, gr
     assert all(draw['numbers'][0] == draw['specialTail'] for draw in shard['draws'])
 
 
+def test_build_serving_v2_bundle_normalizes_historical_station_name_aliases(tmp_path) -> None:
+    repository = SouthernDataLakeRepository(LocalObjectStore(tmp_path), gold_cache_control='no-cache')
+    result = parse_southern_result_page(
+        FIXTURE.read_bytes(),
+        selected_date=date(2026, 7, 16),
+        source_url='https://xoso.com.vn/xsmn-16-07-2026.html',
+    )
+    fact = southern_draw_results_frame([result], 'run-xsmn')
+    tables = build_southern_gold_tables(fact, run_id='run-xsmn')
+    alias_rows = tables['fact-draw-result']['station_code'].eq('AG')
+    tables['fact-draw-result'].loc[alias_rows, 'station_name'] = 'An Giang cũ'
+    _publish(
+        repository,
+        tables,
+        run_id='run-xsmn',
+        target_date=result.draw_date,
+    )
+
+    bundle = build_serving_v2_bundle(repository, LotteryRegion.XSMN, generated_at=GENERATED_AT)
+    key = serving_v2_shard_key('run-xsmn', LotteryRegion.XSMN, 'AG', 2026)
+    shard = bundle.shards[key]
+
+    assert shard['station'] == {'code': 'AG', 'name': 'An Giang'}
+    assert {draw['stationName'] for draw in shard['draws']} == {'An Giang'}
+
+
 def test_write_serving_v2_bundle_writes_latest_metadata_after_shards(tmp_path, grouped_prize_values) -> None:
     repository = _xsmb_repository(tmp_path / 'lake', grouped_prize_values)
     bundle = build_serving_v2_bundle(repository, LotteryRegion.XSMB, generated_at=GENERATED_AT)

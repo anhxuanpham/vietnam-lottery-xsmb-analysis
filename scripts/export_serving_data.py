@@ -225,7 +225,12 @@ def build_serving_v2_bundle(
             }
         )
         for year in years:
-            year_rows = station_rows.loc[station_rows['draw_date'].dt.year.eq(year)]
+            year_rows = station_rows.loc[station_rows['draw_date'].dt.year.eq(year)].copy()
+            # Historical fact rows can contain display-name aliases (for example
+            # ``TP.HCM``) while dim-station carries the current canonical name
+            # (``TPHCM``).  A shard has one station identity, so normalize every
+            # draw to the dimension name before serializing it.
+            year_rows['station_name'] = str(station['name'])
             key = serving_v2_shard_key(release_id, region, station_code, year)
             draws = _draw_records(year_rows)
             shards[key] = {

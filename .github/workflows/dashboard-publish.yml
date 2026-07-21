@@ -147,7 +147,6 @@ jobs:
               --show-error \
               --silent \
               --retry 3 \
-              --retry-all-errors \
               --request PUT \
               "${request_headers[@]}" \
               --data-binary "@$output" \
@@ -177,17 +176,24 @@ jobs:
                 echo "V2 shard release mismatch: $relative" >&2
                 exit 1
               fi
-              curl \
+              shard_response="$(mktemp)"
+              if ! curl \
                 --fail-with-body \
                 --show-error \
                 --silent \
                 --retry 3 \
-                --retry-all-errors \
                 --request PUT \
                 "${request_headers[@]}" \
                 --data-binary "@$shard" \
-                "${DASHBOARD_INGEST_URL%/api/admin/lottery}/api/admin/lottery-v2?kind=shard&region=${region}&release=${release}&station=${station}&year=${year}" \
-                >/dev/null
+                --output "$shard_response" \
+                "${DASHBOARD_INGEST_URL%/api/admin/lottery}/api/admin/lottery-v2?kind=shard&region=${region}&release=${release}&station=${station}&year=${year}"; then
+                echo "V2 shard upload failed: $relative" >&2
+                head -c 2048 "$shard_response" >&2
+                echo >&2
+                rm -f "$shard_response" "$shard_list"
+                exit 1
+              fi
+              rm -f "$shard_response"
               shard_count=$((shard_count + 1))
             done < "$shard_list"
             rm -f "$shard_list"
@@ -201,7 +207,6 @@ jobs:
               --show-error \
               --silent \
               --retry 3 \
-              --retry-all-errors \
               --request PUT \
               "${request_headers[@]}" \
               --data-binary "@$metadata" \

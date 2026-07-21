@@ -11,7 +11,19 @@ XSMB, XSMN, and XSMT use the same Gold filenames in different data lakes. All da
 | `fact-special-prize` | 1 row/date | 1 row/station/date |
 | `dim-station` | not present | 1 row per observed station |
 
-An XSMN date contains three or four stations; an XSMT date contains two or three. Station-level facts are never aggregated into the XSMB grain.
+XSMN and XSMT station sets are matched exactly, not only by count:
+
+| Weekday | XSMN station codes | XSMT station codes |
+|---|---|---|
+| Monday | `CM, DT, HCM` | `PY, TTH` |
+| Tuesday | `BL, BTR, VT` | `DLK, QNA` |
+| Wednesday | `CT, DN, ST` | `DNA, KH` |
+| Thursday | `AG, BTH, TN` | `BDI, QB, QT` |
+| Friday | `BD, TV, VL` | `GL, NT` |
+| Saturday | `BP, HCM, HG, LA` | `DNA, DNO, QNG` |
+| Sunday | `DL, KG, TG` | `KH, KT, TTH` from `2022-01-02`; `KH, KT` before then |
+
+The central calendar also carries six exact source-observed partial station sets in July–September 2021. These dated exceptions are versioned in `station_calendar.py`; an arbitrary station omission still fails quality checks. Station-level facts are never aggregated into the XSMB grain.
 
 ## `fact-draw-result`
 

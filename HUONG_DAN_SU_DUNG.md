@@ -158,7 +158,7 @@ Nguồn XSMN có dữ liệu từ cuối năm 2005 nhưng format cũ dùng giả
 
 Không chạy nhiều batch XSMN đồng thời. Với GitHub Actions, dùng workflow `xsmn-backfill.yml`; workflow chia range thành từng năm, chạy tuần tự và dùng cùng concurrency group với daily XSMN.
 
-XSMT dùng cùng schema 18 giải/đài nhưng mỗi ngày có hai hoặc ba đài. Để tránh các trang lịch sử cũ có giải đặc biệt 5 chữ số hoặc dữ liệu không thể đối chiếu, workflow `xsmt-backfill.yml` mặc định bắt đầu từ `2018-01-01`.
+XSMT dùng cùng schema 18 giải/đài và phải khớp đúng lịch đài theo thứ, thay đổi lịch Chủ nhật từ `2022-01-02`, hoặc một trong sáu bộ đài lịch sử đặc biệt đã được version hóa trong tháng 7–9/2021. Để tránh các trang lịch sử cũ có giải đặc biệt 5 chữ số hoặc dữ liệu không thể đối chiếu, workflow `xsmt-backfill.yml` mặc định bắt đầu từ `2018-01-01`.
 
 ```bash
 uv run lottery-etl backfill \
@@ -190,7 +190,20 @@ uv run lottery-etl validate --storage r2 --region xsmb
 
 Nếu lệnh kết thúc thành công thì toàn bộ critical checks đã pass. `no_draw` là ngày nguồn xác nhận “không mở thưởng”; lỗi mạng hoặc HTML bất thường được ghi `failed` và có thể backfill lại.
 
-### 7.2 Tải Gold về máy
+### 7.2 Audit toàn bộ lịch sử đã publish
+
+Sau khi backfill xong, chạy audit cả ba lake:
+
+```bash
+uv run lottery-etl audit-history --storage r2 --region all
+uv run lottery-etl audit-history --storage r2 --region all --json
+```
+
+Mặc định lệnh kiểm tra từ ngày đầu tiên được hỗ trợ (XSMB `2005-10-01`, XSMN `2010-01-01`, XSMT `2018-01-01`) tới kỳ gần nhất đã qua giờ cutoff của từng miền. Audit tải đúng các Gold Parquet được manifest trỏ tới, kiểm tra size/SHA-256 trước khi đọc, rồi đối chiếu ngày thiếu hoặc `failed`, grain của fact/loto và đúng bộ đài theo từng thứ của XSMN/XSMT. Có thể giới hạn khoảng ngày bằng `--from YYYY-MM-DD --to YYYY-MM-DD`.
+
+Exit code `0` nghĩa là tất cả miền được chọn đều sạch. Exit code `1` nghĩa là report có finding; JSON phù hợp để lưu artifact hoặc làm CI gate sau khi các khoảng thiếu lịch sử đã được xử lý. Lệnh chỉ đọc, không tự đổi `missing` thành `no_draw` và không ghi lại dữ liệu.
+
+### 7.3 Tải Gold về máy
 
 ```bash
 uv run lottery-etl download-gold \
@@ -229,7 +242,7 @@ CSV phù hợp với Power BI/Tableau; Parquet phù hợp với Pandas và DuckD
 - [`sql/xsmn-data-quality-checks.sql`](sql/xsmn-data-quality-checks.sql)
 - [`sql/xsmt-data-quality-checks.sql`](sql/xsmt-data-quality-checks.sql)
 
-### 7.3 Việc cần duy trì
+### 7.4 Việc cần duy trì
 
 1. Giữ `gold/latest` làm nguồn chính cho BI.
 2. Kiểm tra `manifests/latest.json` trước khi refresh dashboard.
@@ -237,7 +250,7 @@ CSV phù hợp với Power BI/Tableau; Parquet phù hợp với Pandas và DuckD
 4. Không chạy full backfill mỗi ngày. Sau khi seed lịch sử, GitHub Actions chỉ cần chạy ngày mới nhất.
 5. Không công khai Bronze, Silver, quality report hoặc credential. Chỉ publish các Gold objects cần thiết.
 
-### 7.4 Xem dashboard frontend local
+### 7.5 Xem dashboard frontend local
 
 Frontend nằm trong `frontend/`. Worker đọc JSON gọn từ một bucket serving riêng; trình duyệt không nhận credential và không đọc trực tiếp Gold Parquet. Ba snapshot đã bundle giúp local dev chạy ngay:
 

@@ -57,7 +57,7 @@ uv run lottery-etl run \
   --target-date 2026-07-16 \
   --fixture tests/fixtures/valid-xsmn-result-page.html
 
-# XSMT; uses the same station grain with a two/three-station daily rule
+# XSMT; uses the same station grain and its exact versioned station calendar
 uv run lottery-etl run \
   --region xsmt \
   --target-date 2026-07-18 \
@@ -76,6 +76,7 @@ uv run lottery-etl run --region all --target-date 2026-07-16
 uv run lottery-etl backfill --region xsmn --from 2026-07-01 --to 2026-07-16
 uv run lottery-etl build-gold --region xsmn
 uv run lottery-etl validate --region xsmn
+uv run lottery-etl audit-history --storage r2 --region all
 uv run lottery-etl download-gold --region all --download-output downloads/
 uv run lottery-etl no-draw --region xsmn --target-date 2026-07-16 --detail "Officially confirmed no draw"
 ```
@@ -85,8 +86,8 @@ When `--region all` and `--output custom-root/` are combined, local objects are 
 ## Region-specific validation
 
 - XSMB requires 27 prize results and 100 loto rows per date; loto frequency sums to 27.
-- XSMN dynamically accepts the three or four stations shown on the requested page. Each station requires 18 prize results, including prize 8, and 100 station-level loto rows whose frequency sums to 18.
-- XSMT dynamically accepts the two or three stations shown on the requested page with the same 18-result station schema.
+- XSMN must match the exact weekday station schedule (three stations Monday–Friday and Sunday, four on Saturday). Each station requires 18 prize results, including prize 8, and 100 station-level loto rows whose frequency sums to 18.
+- XSMT must match its exact weekday station schedule, the Sunday schedule change effective `2022-01-02`, or one of six versioned source-observed partial sets in July–September 2021. Each station uses the same 18-result schema.
 - Leading zeros are retained in `formatted_number` for every official width, including six-digit regional special prizes.
 - XSMN/XSMT station identity is derived from the station link and stored as `station_code`, `station_name`, `station_url`, and `station_order`.
 
@@ -137,6 +138,15 @@ Keep Bronze and Silver private; expose only curated `gold/latest/*.csv` and Parq
 - [Python public-Gold example](examples/read_gold.py)
 
 XSMN and XSMT Gold add `dim-station` and station fields to all facts. Gold CSV files are intended for Power BI and Tableau; Parquet files support Python and DuckDB. Credentials and presigned URLs are never committed.
+
+Audit the complete published history after a backfill with:
+
+```bash
+uv run lottery-etl audit-history --storage r2 --region all
+uv run lottery-etl audit-history --storage r2 --region all --json
+```
+
+The audit starts at the first supported date for each lake (XSMB `2005-10-01`, XSMN `2010-01-01`, XSMT `2018-01-01`) and ends at the latest draw whose regional cutoff has passed. It verifies manifest-bound Gold checksums, calendar coverage, fact/loto grains, and the exact XSMN/XSMT station schedule. Exit code `0` means all requested lakes are clean; exit code `1` means the structured report contains findings. Use `--from` and `--to` to inspect a smaller inclusive range.
 
 ## Automation
 

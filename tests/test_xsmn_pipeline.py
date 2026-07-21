@@ -8,6 +8,7 @@ import pytest
 from xsmb_etl.extract import NoDrawSourcePageError, SourcePageError
 from xsmb_etl.repository import SouthernDataLakeRepository
 from xsmb_etl.run_models import LotteryRegion
+from xsmb_etl.station_calendar import expected_station_codes
 from xsmb_etl.storage import LocalObjectStore
 from xsmb_etl.xsmn_extract import SouthernExtractedResult, parse_southern_result_page
 from xsmb_etl.xsmn_pipeline import SouthernPipeline
@@ -44,9 +45,18 @@ def _extracted() -> SouthernExtractedResult:
 def _extracted_for(target_date: date) -> SouthernExtractedResult:
     extracted = _extracted()
     source_url = f'https://xoso.com.vn/xsmn-{target_date:%d-%m-%Y}.html'
+    station_codes = sorted(expected_station_codes(LotteryRegion.XSMN, target_date))
     stations = tuple(
-        station.model_copy(update={'draw_date': target_date, 'source_url': source_url})
-        for station in extracted.result.stations
+        extracted.result.stations[index % len(extracted.result.stations)].model_copy(
+            update={
+                'draw_date': target_date,
+                'station_code': station_code,
+                'station_name': station_code,
+                'station_url': f'https://xoso.com.vn/xs{station_code.lower()}-p1.html',
+                'source_url': source_url,
+            }
+        )
+        for index, station_code in enumerate(station_codes)
     )
     result = extracted.result.model_copy(
         update={

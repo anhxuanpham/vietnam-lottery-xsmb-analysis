@@ -9,16 +9,9 @@ import pandas as pd
 from xsmb_etl.control import DrawStatus
 from xsmb_etl.quality import QualityReport
 from xsmb_etl.run_models import LotteryRegion
+from xsmb_etl.station_calendar import XSMT_DOCUMENTED_PARTIAL_DRAWS
 from xsmb_etl.xsmn_quality import build_southern_quality_report
 from xsmb_etl.xsmt_models import CentralDailyResult
-
-
-XSMT_DOCUMENTED_PARTIAL_DRAWS: dict[date, frozenset[str]] = {
-    date(2021, 7, 27): frozenset({'QNA'}),
-    date(2021, 8, 3): frozenset({'QNA'}),
-    date(2021, 8, 6): frozenset({'GL'}),
-    date(2021, 8, 18): frozenset({'KH'}),
-}
 
 
 def build_central_quality_report(
@@ -44,4 +37,4 @@ def build_central_quality_report(
     )
 
 
-__all__ = ['build_central_quality_report']
+__all__ = ['XSMT_DOCUMENTED_PARTIAL_DRAWS', 'build_central_quality_report']

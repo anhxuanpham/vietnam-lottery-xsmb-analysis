@@ -11,6 +11,7 @@ import pandas as pd
 from xsmb_etl.control import DrawStatus
 from xsmb_etl.quality import QualityCheck, QualityReport, QualitySeverity
 from xsmb_etl.run_models import LotteryRegion
+from xsmb_etl.station_calendar import expected_station_codes
 from xsmb_etl.xsmn_models import SOUTHERN_EXPECTED_RESULT_COUNT, SOUTHERN_PRIZE_SPECS, SouthernDailyResult
 
 
@@ -29,15 +30,21 @@ def build_southern_quality_report(
     today = today or datetime.now(UTC).date()
     target_dates = tuple(sorted({result.draw_date for result in results}))
     station_results = [station for result in results for station in result.stations]
-    expected_station_counts = {2, 3} if region is LotteryRegion.XSMT else {3, 4}
     documented_partial_draws = documented_partial_draws or {}
     region_label = region.value.upper()
-    station_sets_valid = bool(results) and all(
-        ({station.station_code for station in result.stations} == documented_partial_draws[result.draw_date])
-        if result.draw_date in documented_partial_draws
-        else len(result.stations) in expected_station_counts
-        for result in results
-    )
+    station_set_mismatches = []
+    for result in results:
+        actual = frozenset(station.station_code for station in result.stations)
+        expected = expected_station_codes(region, result.draw_date)
+        if actual != expected:
+            station_set_mismatches.append(
+                {
+                    'draw_date': result.draw_date.isoformat(),
+                    'expected': sorted(expected),
+                    'actual': sorted(actual),
+                }
+            )
+    station_sets_valid = bool(results) and not station_set_mismatches
     applied_partial_draws = sorted(
         result.draw_date.isoformat() for result in results if result.draw_date in documented_partial_draws
     )
@@ -46,10 +53,11 @@ def build_southern_quality_report(
         _check(
             'station-count-per-day',
             station_sets_valid,
-            f'each {region_label} date contains '
-            f'{min(expected_station_counts)} or {max(expected_station_counts)} stations, '
-            'or matches an exact documented partial-draw station set',
-            details={'documented_partial_draw_dates': applied_partial_draws},
+            f'each {region_label} date matches its exact published weekday station set',
+            details={
+                'documented_partial_draw_dates': applied_partial_draws,
+                'station_set_mismatches': station_set_mismatches,
+            },
         ),
         _check(
             'station-code-unique-per-day',

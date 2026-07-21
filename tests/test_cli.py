@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, date, datetime
+from types import SimpleNamespace
 
+import pytest
+
+from xsmb_etl import cli
 from xsmb_etl.cli import main
 from xsmb_etl.repository import CentralDataLakeRepository, DataLakeRepository, SouthernDataLakeRepository
 from xsmb_etl.run_models import DataObjectReference, LotteryRegion, RunManifest, RunStatus, SourceLineage
@@ -256,6 +260,262 @@ def test_cli_status_reports_missing_publication_in_text_mode(tmp_path, capsys) -
     output = capsys.readouterr().out
     assert 'XSMB  UNHEALTHY' in output
     assert 'manifests/latest.json is missing' in output
+
+
+class _FakeHistoryAuditReport:
+    def __init__(
+        self,
+        region: LotteryRegion,
+        *,
+        healthy: bool,
+        from_date: date,
+        to_date: date,
+    ) -> None:
+        self.region = region
+        self.healthy = healthy
+        self.run_id = f'{region.value}-run'
+        self.dataset_version = 'gold-v1'
+        self.manifest_target_date = to_date
+        self.from_date = from_date
+        self.to_date = to_date
+        self.latest_completed_date = to_date
+        self.fact_row_count = 100
+        self.loto_row_count = 50
+        self.station_count = 1
+        self.status_counts = {'success': 2}
+        self.issues = ()
+
+    def model_dump(self, *, mode: str):
+        assert mode == 'json'
+        return {
+            'region': self.region.value,
+            'healthy': self.healthy,
+            'run_id': self.run_id,
+            'dataset_version': self.dataset_version,
+            'manifest_target_date': self.manifest_target_date.isoformat(),
+            'from_date': self.from_date.isoformat(),
+            'to_date': self.to_date.isoformat(),
+            'latest_completed_date': self.latest_completed_date.isoformat(),
+            'fact_row_count': self.fact_row_count,
+            'loto_row_count': self.loto_row_count,
+            'station_count': self.station_count,
+            'status_counts': self.status_counts,
+            'issues': [],
+        }
+
+    def model_dump_json(self, *, indent: int) -> str:
+        return json.dumps(self.model_dump(mode='json'), indent=indent)
+
+
+def test_cli_audit_history_routes_all_regions_and_returns_findings(tmp_path, capsys, monkeypatch) -> None:
+    repositories: list[tuple[str | None, LotteryRegion, object]] = []
+    calls: list[tuple[LotteryRegion, date | None, date | None]] = []
+
+    def fake_repository(_settings, storage, region, *, output=None):
+        repositories.append((storage, region, output))
+        return SimpleNamespace(region=region)
+
+    def fake_audit_history(repository, *, from_date=None, to_date=None):
+        calls.append((repository.region, from_date, to_date))
+        return _FakeHistoryAuditReport(
+            repository.region,
+            healthy=repository.region is not LotteryRegion.XSMT,
+            from_date=from_date,
+            to_date=to_date,
+        )
+
+    monkeypatch.setattr(cli, '_repository', fake_repository)
+    monkeypatch.setattr(cli, 'audit_history', fake_audit_history)
+
+    assert (
+        main(
+            [
+                'audit-history',
+                '--storage',
+                'local',
+                '--region',
+                'all',
+                '--output',
+                str(tmp_path),
+                '--from',
+                '2026-07-01',
+                '--to',
+                '2026-07-20',
+                '--json',
+            ]
+        )
+        == 1
+    )
+
+    reports = json.loads(capsys.readouterr().out)
+    assert set(reports) == {'xsmb', 'xsmn', 'xsmt'}
+    assert reports['xsmt']['healthy'] is False
+    assert repositories == [
+        ('local', LotteryRegion.XSMB, tmp_path / 'xsmb'),
+        ('local', LotteryRegion.XSMN, tmp_path / 'xsmn'),
+        ('local', LotteryRegion.XSMT, tmp_path / 'xsmt'),
+    ]
+    assert calls == [
+        (LotteryRegion.XSMB, date(2026, 7, 1), date(2026, 7, 20)),
+        (LotteryRegion.XSMN, date(2026, 7, 1), date(2026, 7, 20)),
+        (LotteryRegion.XSMT, date(2026, 7, 1), date(2026, 7, 20)),
+    ]
+
+
+def test_cli_audit_history_emits_one_report_object_for_one_region(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(cli, '_repository_for_args', lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(
+        cli,
+        'audit_history',
+        lambda *_args, **_kwargs: _FakeHistoryAuditReport(
+            LotteryRegion.XSMN,
+            healthy=True,
+            from_date=date(2026, 1, 1),
+            to_date=date(2026, 7, 20),
+        ),
+    )
+
+    assert main(['audit-history', '--region', 'xsmn', '--json']) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report['region'] == 'xsmn'
+    assert 'xsmn' not in report
+
+
+def test_cli_audit_history_prints_concise_text_findings(capsys, monkeypatch) -> None:
+    report = _FakeHistoryAuditReport(
+        LotteryRegion.XSMT,
+        healthy=False,
+        from_date=date(2021, 1, 1),
+        to_date=date(2026, 7, 20),
+    )
+    report.issues = (
+        SimpleNamespace(
+            severity='critical',
+            code='missing_draw_dates',
+            message='2 expected draw dates are missing',
+        ),
+    )
+    monkeypatch.setattr(cli, '_repository_for_args', lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(cli, 'audit_history', lambda *_args, **_kwargs: report)
+
+    assert main(['audit-history', '--region', 'xsmt']) == 1
+    output = capsys.readouterr().out
+    assert 'XSMT  FINDINGS' in output
+    assert 'range: 2021-01-01 to 2026-07-20' in output
+    assert 'rows: fact=100; loto=50; stations=1' in output
+    assert 'CRITICAL missing_draw_dates: 2 expected draw dates are missing' in output
+
+
+def test_cli_audit_history_rejects_reversed_range_before_loading_settings(capsys, monkeypatch) -> None:
+    def unexpected_settings():
+        raise AssertionError('Settings must not be loaded for an invalid date range')
+
+    monkeypatch.setattr(cli, 'Settings', unexpected_settings)
+
+    with pytest.raises(SystemExit) as error:
+        main(['audit-history', '--from', '2026-07-20', '--to', '2026-07-19'])
+
+    assert error.value.code == 2
+    assert '--to must be on or after --from' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ('arguments', 'invalid_region'),
+    [
+        (['--region', 'xsmt', '--to', '2017-12-31'], 'xsmt'),
+        (['--region', 'all', '--to', '2017-12-31'], 'xsmt'),
+        (['--region', 'all', '--from', '9999-12-31'], 'xsmb'),
+    ],
+)
+def test_cli_audit_history_rejects_reversed_resolved_range_before_loading_settings(
+    arguments,
+    invalid_region,
+    capsys,
+    monkeypatch,
+) -> None:
+    def unexpected_settings():
+        raise AssertionError('Settings must not be loaded for an invalid resolved range')
+
+    monkeypatch.setattr(cli, 'Settings', unexpected_settings)
+
+    with pytest.raises(SystemExit) as error:
+        main(['audit-history', *arguments])
+
+    assert error.value.code == 2
+    stderr = capsys.readouterr().err
+    assert '--to must be on or after --from' in stderr
+    assert f'for {invalid_region}' in stderr
+
+
+def test_cli_audit_history_converts_core_range_error_to_argparse_exit(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(cli, '_repository_for_args', lambda *_args, **_kwargs: SimpleNamespace())
+
+    def reject_range(*_args, **_kwargs):
+        raise ValueError('to_date must be on or after from_date')
+
+    monkeypatch.setattr(cli, 'audit_history', reject_range)
+
+    with pytest.raises(SystemExit) as error:
+        main(['audit-history', '--from', '2026-07-01', '--to', '2026-07-20'])
+
+    assert error.value.code == 2
+    assert '--to must be on or after --from' in capsys.readouterr().err
+
+
+def test_cli_audit_history_does_not_mask_unrelated_storage_errors(monkeypatch) -> None:
+    monkeypatch.setattr(cli, '_repository_for_args', lambda *_args, **_kwargs: SimpleNamespace())
+    storage_error = RuntimeError('storage unavailable')
+
+    def fail_storage(*_args, **_kwargs):
+        raise storage_error
+
+    monkeypatch.setattr(cli, 'audit_history', fail_storage)
+
+    with pytest.raises(RuntimeError) as error:
+        main(['audit-history', '--from', '2026-07-01', '--to', '2026-07-20'])
+
+    assert error.value is storage_error
+
+
+def test_cli_audit_history_integrates_with_a_local_gold_publication(tmp_path, capsys) -> None:
+    assert (
+        main(
+            [
+                'run',
+                '--target-date',
+                '2026-07-16',
+                '--fixture',
+                'tests/fixtures/valid-result-page.html',
+                '--output',
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                'audit-history',
+                '--storage',
+                'local',
+                '--output',
+                str(tmp_path),
+                '--from',
+                '2026-07-16',
+                '--to',
+                '2026-07-16',
+                '--json',
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report['region'] == 'xsmb'
+    assert report['healthy'] is True
+    assert report['fact_row_count'] == 27
+    assert report['status_counts']['success'] == 1
 
 
 def _publish_minimal_lake(root, region: LotteryRegion) -> LocalObjectStore:

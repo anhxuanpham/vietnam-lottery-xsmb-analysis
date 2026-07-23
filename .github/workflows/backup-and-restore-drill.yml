@@ -2,9 +2,11 @@ name: Backup Published Lottery Releases
 
 on:
   workflow_dispatch:
-  schedule:
-    # Run after the regional ETL and dashboard publication windows.
-    - cron: "17 14 * * *"
+  workflow_run:
+    workflows:
+      - Publish Lottery Dashboard Data
+    types:
+      - completed
 
 permissions:
   contents: read
@@ -15,6 +17,12 @@ concurrency:
 
 jobs:
   backup-and-drill:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:

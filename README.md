@@ -150,8 +150,12 @@ size/SHA-256 reference. The weekly export writes immutable CSV under `exports/cs
 
 XSMN and XSMT Gold add `dim-station` and station fields to all facts. Manifest-addressed weekly CSV exports are
 intended for Power BI and Tableau; immutable Parquet supports Python and DuckDB. Credentials and presigned URLs are
-never committed. Analytics results carry `dataset_version`, and walk-forward calculations use only prior rows to
-prevent leakage.
+never committed. Benchmark Integrity v1 binds every walk-forward result to the dataset version, region, station,
+model, window, training/evaluation ranges, and deterministic fingerprint. It trains only on prior draws, reports a
+deterministic draw-level bootstrap 95% confidence interval plus hit rate, and compares coverage with the dynamic
+`topK / 100` baseline. The three heuristics across four selectable windows are 12 exploratory configurations, not
+confirmatory evidence or a betting system. The dashboard shows each interval and fingerprint and can download the
+selected station/window benchmark as a lineage-bound JSON report.
 
 Audit the complete published history after a backfill with:
 
@@ -166,21 +170,24 @@ The audit starts at the first supported date for each lake (XSMB `2005-10-01`, X
 
 - `ci.yml` runs Ruff, pytest, all three offline fixture pipelines, and frontend lint/type/build/API tests without production secrets.
 - `daily-etl.yml` queues at 18:17 Vietnam time, waits until the safe 18:35 draw cutoff, then runs all three independent R2 lakes. Manual region, target-date, and force inputs remain available without the scheduled wait.
-- `dashboard-publish.yml` runs at 19:47 Vietnam time, away from GitHub's top-of-hour scheduling hotspot. It validates healthy manifests against the 18:35 draw cutoff, audits the complete published history of all three lakes, and only then exports compact station-grain JSON to the private Sites serving bucket. Gate reports produced by each run are retained as a workflow artifact for 30 days.
+- `dashboard-publish.yml` starts after a successful scheduled `daily-etl.yml` run, while retaining manual dispatch. It validates healthy manifests against the 18:35 draw cutoff and audits the complete published history of all three lakes before publishing to the private Sites serving bucket. Every immutable station/year shard is path- and release-validated first, shard uploads then run with bounded concurrency `8`, and the v2 metadata pointer is written only after all uploads succeed. Gate reports and upload timing/count evidence are retained as a workflow artifact for 30 days.
 - `weekly-csv-export.yml` materializes verified CSV snapshots every Sunday without doubling every daily Gold write.
-- `backup-and-restore-drill.yml` backs up the exact published Gold/Control boundary and proves an isolated,
-  consumer-only restore every day. It intentionally does not restore Bronze/Silver and therefore cannot target or
-  resume the primary ETL lake.
+- `backup-and-restore-drill.yml` starts after a successful dashboard publication, while retaining manual dispatch. It
+  backs up the exact published Gold/Control boundary and proves an isolated, consumer-only restore. It intentionally
+  does not restore Bronze/Silver and therefore cannot target or resume the primary ETL lake.
 - `xsmn-backfill.yml` runs resumable yearly XSMN batches from 2010 onward, one year at a time, and publishes Gold once per batch. The current-year batch stops at yesterday because the daily ETL owns today's draw after publication time.
 - `xsmt-backfill.yml` does the same for XSMT from 2018 onward using its own concurrency group and bucket.
 - `xsmb-gap-repair.yml` is a manual, bounded historical repair. It shares the XSMB daily concurrency group, never uses `--force`, publishes Gold once, audits the requested range, and retains its JSON evidence for 30 days.
 - The daily workflow has read-only repository permissions and writes generated data to R2 rather than committing it to Git.
 
-The Sites Worker exposes `/api/health/lottery`, `/api/v2/lottery`, and cursor-paginated `/api/v2/results`. Its
-15-minute watchdog window checks the three serving snapshots plus the activated v2 release pointers directly, records incidents/recovery in R2, and sends an
-optional webhook when `ALERT_WEBHOOK_URL` is configured. The Explorer loads historical year/station shards lazily and
-falls back to the compact snapshot if history is temporarily unavailable. The deployed site is owner-only; external
-API probes use the configured Sites bypass header, while the internal watchdog calls the health logic directly.
+The Sites Worker exposes `/api/health/lottery`, redacted watchdog state at `/api/ops/lottery`, v2 metadata at
+`/api/v2/lottery`, and cursor-paginated `/api/v2/results`. Its 15-minute watchdog window checks the three serving
+snapshots plus the activated v2 release pointers directly, records incidents/recovery in R2, and sends an optional
+webhook when `ALERT_WEBHOOK_URL` is configured. The Explorer loads historical year/station shards lazily, snapshots
+the submitted filters separately from draft edits, appends and deduplicates cursor pages, and automatically executes
+a valid station deep link once the station metadata is ready. Stale cursors require a clean reload; the compact v1
+fallback remains bounded to 25 rows. The deployed site is owner-only; external API probes use the configured Sites
+bypass header, while the internal watchdog calls the health logic directly.
 
 ## Legacy analysis
 

@@ -264,8 +264,15 @@ npm run dev
 ```
 
 Mở URL được in trong terminal, thường là `http://localhost:3000`. Dashboard có đủ XSMB/XSMN/XSMT, Explorer lịch sử
-lọc theo đài/ngày/số, heatmap `00`–`99`, ba heuristic và walk-forward backtest. Mỗi model chỉ chạy trên một đài và
-chỉ train bằng các kỳ trước kỳ đánh giá.
+lọc theo đài/ngày/số, heatmap `00`–`99`, ba heuristic và Benchmark Integrity v1 walk-forward. Explorer tự chạy deep
+link hợp lệ một lần sau khi metadata đài sẵn sàng; **Tải thêm kết quả** nối trang, loại trùng và giữ thứ tự ngày giảm
+dần. Bộ lọc ngày/số đang sửa nháp không làm thay đổi URL hoặc tiếp tục cursor của query cũ trước khi bấm
+**Tra kết quả**.
+
+Mỗi model chỉ chạy trên một đài và chỉ train bằng các kỳ trước kỳ đánh giá. Benchmark ghi dataset version, region,
+station, model, window, training/evaluation range, hit rate, deterministic bootstrap 95% CI và fingerprint. Báo cáo
+JSON tải xuống dùng chính lineage/fingerprint này. Có 3 model × 4 cửa sổ = 12 cấu hình exploratory; không được chọn
+kết quả đẹp nhất rồi mô tả như một thử nghiệm xác nhận.
 
 Muốn làm mới snapshot bundle từ ba lake R2 đang publish, chạy `npm run data:refresh`; lệnh này đọc credential từ `.env` ở root và kiểm tra checksum theo manifest trước khi ghi JSON.
 
@@ -278,14 +285,17 @@ Các workflow production định kỳ và repair thủ công đã có sẵn:
 - `.github/workflows/daily-etl.yml`: lấy ngày mới nhất cho XSMB, XSMN và XSMT.
 - `.github/workflows/xsmn-backfill.yml`: backfill XSMN theo từng năm từ 2010.
 - `.github/workflows/xsmt-backfill.yml`: backfill XSMT theo từng năm từ 2018.
-- `.github/workflows/dashboard-publish.yml`: 19:47 mỗi ngày, tránh đầu giờ cao tải của GitHub, kiểm tra metadata và toàn bộ lịch sử của cả ba miền theo cutoff 18:35 rồi mới publish JSON serving; các báo cáo JSON tạo được sẽ được giữ 30 ngày.
+- `.github/workflows/dashboard-publish.yml`: tự chạy sau scheduled Daily ETL thành công, kiểm tra metadata và toàn bộ
+  lịch sử của cả ba miền theo cutoff 18:35 rồi mới publish JSON serving. Shard được pre-validate toàn bộ, upload tối
+  đa 8 luồng, và metadata pointer luôn ghi cuối. Các báo cáo JSON cùng số shard/thời gian tạo được sẽ được giữ 30 ngày.
 - `.github/workflows/weekly-csv-export.yml`: tạo CSV manifest-addressed mỗi Chủ nhật.
-- `.github/workflows/backup-and-restore-drill.yml`: backup Gold publication boundary và chứng minh restore cách ly mỗi ngày.
+- `.github/workflows/backup-and-restore-drill.yml`: tự chạy sau Dashboard publish thành công, backup Gold publication
+  boundary và chứng minh restore cách ly; vẫn có thể dispatch thủ công.
 - `.github/workflows/xsmb-gap-repair.yml`: repair một range XSMB lịch sử, dùng chung concurrency với Daily, không `--force`, rồi audit và lưu JSON artifact 30 ngày.
 
 ### 8.1 Đưa workflow lên default branch
 
-Workflow manual và schedule phải có trong default branch của repository. Trước khi push:
+Workflow có `schedule`, `workflow_run` hoặc `workflow_dispatch` phải có trong default branch của repository. Trước khi push:
 
 ```bash
 git status
@@ -384,6 +394,15 @@ GitHub dùng UTC, nên `11:17 UTC` tương ứng `18:17 Asia/Ho_Chi_Minh`. Workf
 - `fail-fast: false` bảo đảm một region lỗi không hủy job region còn lại.
 - Concurrency theo region ngăn daily ghi chồng lên historical backfill cùng lake nhưng không chặn hai region còn lại.
 
+Sau khi scheduled Daily ETL kết thúc thành công, GitHub phát sự kiện để chạy `dashboard-publish.yml`; không còn cron
+Dashboard riêng nên scheduler trễ bao nhiêu thì publish vẫn bám theo lúc ETL thực sự xong. Dashboard manual vẫn dùng
+được. Sau mỗi Dashboard publish thành công, `backup-and-restore-drill.yml` tự chạy tiếp. Nếu Daily scheduled hoặc
+Dashboard lỗi, job kế tiếp không chạy; sửa lỗi rồi dispatch workflow cần thiết thủ công.
+
+Dashboard pre-validate toàn bộ đường dẫn, region, release ID và số shard trước khi gửi. Shard upload song song tối đa
+8 luồng. Chỉ khi mọi shard thành công metadata v2 mới được ghi cuối; bất kỳ shard lỗi nào cũng giữ pointer cũ của
+miền đó và làm workflow đỏ. Job summary ghi số shard và thời gian upload/tổng thời gian từng miền.
+
 Scheduled workflow trong public repository có thể bị GitHub tự tắt sau 60 ngày repository không hoạt động. Fork public cũng thường tắt schedule mặc định; vào tab Actions để bật lại khi cần.
 
 ### 8.6 Chạy historical XSMN backfill
@@ -474,8 +493,11 @@ Hoặc chạy backfill một khoảng ngắn. Ngày thành công sẽ bị skip,
 - [ ] Manual workflow run thành công.
 - [ ] `manifests/latest.json` của mỗi bucket đúng region và target date.
 - [ ] Dashboard chỉ đọc Worker API; BI resolve `exports/csv/latest.json`.
-- [ ] `/api/health/lottery` trả `200` khi probe owner-only gửi header `OAI-Sites-Authorization`; optional
-  `ALERT_WEBHOOK_URL` đã test nếu cần alert.
+- [ ] `/api/health/lottery` trả `200` khi probe owner-only gửi header `OAI-Sites-Authorization`; `/api/ops/lottery`
+  trả watchdog state đã redacted hoặc `available=false` trước lần quan sát đầu tiên; optional `ALERT_WEBHOOK_URL` đã
+  test nếu cần alert.
+- [ ] Scheduled Daily ETL xanh tự kích hoạt Dashboard publish; Dashboard xanh tự kích hoạt Backup/DR.
+- [ ] Dashboard summary xác nhận shard upload parallelism `8`, không có lỗi và metadata pointer đã publish cuối.
 - [ ] Backup/restore drill đủ ba miền và artifact status đều `healthy=true`.
 
 ## Tài liệu tham khảo chính thức

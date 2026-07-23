@@ -12,6 +12,7 @@ import {
   handleLotteryV2Metadata,
   handleLotteryV2Results,
 } from "./lottery-v2.ts";
+import { handleLotteryWatchdogStatus } from "./ops-status.ts";
 import { runLotteryWatchdog } from "./watchdog.ts";
 
 const MAX_INGEST_BYTES = 8 * 1024 * 1024;
@@ -213,6 +214,7 @@ const worker = {
     if (url.pathname === "/api/v2/results") return handleLotteryV2Results(request, env, url);
     if (url.pathname === "/api/admin/lottery-v2") return handleLotteryV2Ingest(request, env, url);
     if (url.pathname === "/api/health/lottery") return handleLotteryHealthRequest(request, env);
+    if (url.pathname === "/api/ops/lottery") return handleLotteryWatchdogStatus(request, env);
 
     if (url.pathname === "/_vinext/image") {
       const allowedWidths = [...DEFAULT_DEVICE_SIZES, ...DEFAULT_IMAGE_SIZES];

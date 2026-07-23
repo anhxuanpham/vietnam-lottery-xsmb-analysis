@@ -100,6 +100,20 @@ export type LotteryV2ResultsPage = {
   items: LotteryDraw[];
 };
 
+export type LotteryWatchdogStatus = {
+  schemaVersion: 1;
+  service: "lottery-watchdog";
+  available: boolean;
+  state: {
+    status: "healthy" | "pending" | "warning" | "critical";
+    expectedTargetDate: string;
+    lastObservedAt: string;
+    activeIncident: boolean;
+    openedAt: string | null;
+    notifiedSeverity: "warning" | "critical" | null;
+  } | null;
+};
+
 const REGION_NAMES: Record<LotteryRegion, string> = {
   xsmb: "Miền Bắc",
   xsmn: "Miền Nam",
@@ -329,6 +343,25 @@ export function normalizeLotteryV2ReleaseMetadata(
   expectedRegion: LotteryRegion,
 ): LotteryV2ReleaseMetadata | null {
   return isLotteryV2ReleaseMetadata(value, expectedRegion) ? value : null;
+}
+
+export function normalizeLotteryWatchdogStatus(value: unknown): LotteryWatchdogStatus | null {
+  if (!isRecord(value) || value.schemaVersion !== 1 || value.service !== "lottery-watchdog" ||
+    typeof value.available !== "boolean") return null;
+  if (!value.available) return value.state === null ? value as LotteryWatchdogStatus : null;
+  const state = value.state;
+  if (!isRecord(state) ||
+    (state.status !== "healthy" && state.status !== "pending" &&
+      state.status !== "warning" && state.status !== "critical") ||
+    !isIsoDate(state.expectedTargetDate) ||
+    !isNonEmptyString(state.lastObservedAt) || Number.isNaN(Date.parse(state.lastObservedAt)) ||
+    typeof state.activeIncident !== "boolean" ||
+    (state.openedAt !== null &&
+      (!isNonEmptyString(state.openedAt) || Number.isNaN(Date.parse(state.openedAt)))) ||
+    (state.notifiedSeverity !== null &&
+      state.notifiedSeverity !== "warning" && state.notifiedSeverity !== "critical")) return null;
+  if (state.activeIncident !== (state.openedAt !== null)) return null;
+  return value as LotteryWatchdogStatus;
 }
 
 export function normalizeLotteryV2ResultsPage(

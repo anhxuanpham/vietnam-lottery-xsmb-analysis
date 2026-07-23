@@ -41,9 +41,10 @@ test("server-renders the branded analytics shell", async () => {
 });
 
 test("ships all three serving-schema demo datasets and removes the starter preview", async () => {
-  const [page, layout, ...datasets] = await Promise.all([
+  const [page, layout, dashboardData, ...datasets] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../dashboard-data.ts", import.meta.url), "utf8"),
     ...["xsmb", "xsmn", "xsmt"].map((region) =>
       readFile(new URL(`../public/data/${region}-demo.json`, import.meta.url), "utf8"),
     ),
@@ -51,9 +52,17 @@ test("ships all three serving-schema demo datasets and removes the starter previ
   assert.match(page, /MODEL LAB/);
   assert.match(page, /backtest/i);
   assert.match(page, /RESULT EXPLORER/);
-  assert.match(page, /\/api\/v2\/results/);
+  assert.match(dashboardData, /\/api\/v2\/results/);
   assert.match(page, /Tra kết quả/);
+  assert.match(page, /Tải thêm kết quả/);
+  assert.match(page, /Không tìm thấy kỳ quay phù hợp/);
   assert.match(page, /ANALYTICS_MODEL_VERSION/);
+  assert.match(page, /95% CI/);
+  assert.match(page, /Tải benchmark JSON/);
+  assert.match(page, /12 lựa chọn model\/cửa sổ/);
+  assert.match(page, /model\.benchmark\.fingerprint/);
+  assert.match(page, /fetchLotteryOperations/);
+  assert.match(page, /Watchdog gần nhất/);
   assert.match(page, /không phải dự báo xác suất trúng/i);
   assert.match(page, /LOTTERY_REGIONS/);
   assert.match(layout, /lang="vi"/);
@@ -107,6 +116,27 @@ test("serves R2 first and falls back to bundled regional assets", async () => {
   assert.equal(fallbackResponse.status, 200);
   assert.equal(fallbackResponse.headers.get("x-lottery-source"), "bundled-demo");
   assert.equal((await fallbackResponse.json()).region, "xsmn");
+});
+
+test("routes the redacted watchdog status API through the production worker", async () => {
+  const worker = await loadWorker();
+  const response = await worker.fetch(
+    new Request("http://localhost/api/ops/lottery"),
+    {
+      LOTTERY_DATA: { get: async () => null },
+      ASSETS: { fetch: async () => new Response("unused") },
+    },
+    executionContext,
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await response.json(), {
+    schemaVersion: 1,
+    service: "lottery-watchdog",
+    available: false,
+    state: null,
+  });
 });
 
 test("validates region and protects the R2 ingest endpoint", async () => {

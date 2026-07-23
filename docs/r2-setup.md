@@ -130,6 +130,11 @@ Lottery Releases` and retain its backup/restore/status artifact. The restore dri
 it restores Gold/manifests/control into an isolated local lake, writes `recovery/consumer-only.json`, and blocks ETL
 because Bronze/Silver are not part of this release backup.
 
+For the recurring path, only Daily ETL owns the lottery-data cron. A successful scheduled Daily run triggers Dashboard
+publication; a successful Dashboard run then triggers the backup/restore drill. Confirm both downstream workflow files
+are present on the default branch. Dashboard validates the complete v2 shard set before uploading with concurrency `8`
+and writes each region's metadata pointer only after every shard succeeds.
+
 ## Troubleshooting S3 signatures
 
 `SignatureDoesNotMatch` occurs before ETL logic can list the bucket. Check all of the following:

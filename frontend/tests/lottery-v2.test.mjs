@@ -174,6 +174,55 @@ test("v2 results filters exactly and paginates with a stable cursor", async () =
   assert.ok(exactPage.items[0].numbers.includes(exact.numbers[0]));
 });
 
+test("v2 cursor crosses a year boundary when the newest shard exactly fills a page", async () => {
+  const olderYear = year - 1;
+  const olderDraw = structuredClone(sampleDraws[0]);
+  olderDraw.date = `${olderYear}-12-31`;
+  const expanded = structuredClone(metadata);
+  expanded.range.from = olderDraw.date;
+  expanded.drawCount += 1;
+  expanded.resultCount += 27;
+  expanded.stations[0].range.from = olderDraw.date;
+  expanded.stations[0].drawCount += 1;
+  expanded.stations[0].resultCount += 27;
+  expanded.stations[0].years = [olderYear, year];
+  const olderShard = {
+    ...structuredClone(shard),
+    year: olderYear,
+    range: { from: olderDraw.date, to: olderDraw.date },
+    drawCount: 1,
+    resultCount: 27,
+    draws: [olderDraw],
+  };
+  const objects = new Map([
+    ["v2/regions/xsmb/latest.json", expanded],
+    [lotteryV2ShardKey(releaseId, "xsmb", stationCode, year), shard],
+    [lotteryV2ShardKey(releaseId, "xsmb", stationCode, olderYear), olderShard],
+  ]);
+  const env = {
+    LOTTERY_DATA: {
+      get: async (key) => objects.has(key) ? r2Object(objects.get(key)) : null,
+    },
+  };
+  const firstUrl = new URL(
+    `https://example.test/api/v2/results?region=xsmb&station=${stationCode}&limit=${sampleDraws.length}`,
+  );
+  const first = await handleLotteryV2Results(new Request(firstUrl), env, firstUrl);
+  const firstPage = await first.json();
+  assert.equal(first.status, 200);
+  assert.equal(firstPage.items.length, sampleDraws.length);
+  assert.ok(firstPage.page.nextCursor);
+  assert.ok(firstPage.items.every((item) => Number(item.date.slice(0, 4)) === year));
+
+  const secondUrl = new URL(firstUrl);
+  secondUrl.searchParams.set("cursor", firstPage.page.nextCursor);
+  const second = await handleLotteryV2Results(new Request(secondUrl), env, secondUrl);
+  const secondPage = await second.json();
+  assert.equal(second.status, 200);
+  assert.deepEqual(secondPage.items.map((item) => item.date), [olderDraw.date]);
+  assert.equal(secondPage.page.nextCursor, null);
+});
+
 test("v2 cursor pages read only the newest shard needed for the requested window", async () => {
   const expanded = structuredClone(metadata);
   expanded.range.from = "2024-01-01";

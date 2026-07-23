@@ -1,16 +1,27 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ANALYTICS_MODEL_VERSION,
   BASELINE_COVERAGE,
+  DEFAULT_EVALUATION_LIMIT,
+  DEFAULT_TOP_K,
+  MODEL_KINDS,
   backtest,
   frequencies,
   gaps,
   pickNumbers,
+  type BacktestResult,
   type ModelKind,
 } from "@/analytics";
 import {
+  benchmarkReportFilename,
+  buildBenchmarkReport,
+} from "@/benchmark-report";
+import {
+  ExplorerPageError,
+  compatibilityExplorerItems,
+  fetchExplorerPage,
   fetchPreferredDashboard,
   fetchStationHistory,
   type DashboardLoad,
@@ -18,9 +29,20 @@ import {
   type ServingMode,
 } from "@/dashboard-data";
 import {
+  INITIAL_EXPLORER_STATE,
+  beginExplorerRequest,
+  completeExplorerRequest,
+  explorerQueryError,
+  failExplorerRequest,
+  type ExplorerQuery,
+} from "@/explorer-state";
+import {
+  fetchLotteryOperations,
+  type LotteryOperationsSnapshot,
+} from "@/ops-data";
+import {
   LOTTERY_REGIONS,
   isLotteryRegion,
-  normalizeLotteryV2ResultsPage,
   regionName,
   type LotteryDashboardData,
   type LotteryDraw,
@@ -33,9 +55,7 @@ type ModelResult = {
   eyebrow: string;
   description: string;
   picks: string[];
-  coverage: number;
-  lift: number;
-  evaluationCount: number;
+  benchmark: BacktestResult;
 };
 
 const WINDOW_OPTIONS = [30, 90, 180, 365] as const;
@@ -64,6 +84,17 @@ function formatDate(value: string) {
     month: "2-digit",
     year: "numeric",
   }).format(new Date(`${value}T00:00:00+07:00`));
+}
+
+function formatTimestamp(value: string | null | undefined) {
+  if (!value) return "Chưa có bằng chứng chạy";
+  return new Intl.DateTimeFormat("vi-VN", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
 }
 
 function DashboardLoading() {
@@ -97,16 +128,33 @@ export default function Home() {
   const [activeWindow, setActiveWindow] = useState(90);
   const [lastRun, setLastRun] = useState("Chưa chạy");
   const [reloadToken, setReloadToken] = useState(0);
+  const [operations, setOperations] = useState<LotteryOperationsSnapshot | null>(null);
+  const [operationsError, setOperationsError] = useState("");
   const [explorerFrom, setExplorerFrom] = useState(() => initialSearchParameter("from"));
   const [explorerTo, setExplorerTo] = useState(() => initialSearchParameter("to"));
   const [explorerNumber, setExplorerNumber] = useState(() => initialSearchParameter("number"));
-  const [explorerItems, setExplorerItems] = useState<LotteryDraw[]>([]);
-  const [explorerCursor, setExplorerCursor] = useState<string | null>(null);
-  const [explorerLoading, setExplorerLoading] = useState(false);
-  const [explorerError, setExplorerError] = useState("");
+  const [explorerState, setExplorerState] = useState(INITIAL_EXPLORER_STATE);
   const explorerAbortController = useRef<AbortController | null>(null);
+  const explorerDeepLinkPending = useRef(
+    typeof window !== "undefined" && new URLSearchParams(window.location.search).has("station"),
+  );
 
   useEffect(() => () => explorerAbortController.current?.abort(), []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchLotteryOperations({ signal: controller.signal })
+      .then((snapshot) => {
+        setOperations(snapshot);
+        setOperationsError("");
+      })
+      .catch((reason: unknown) => {
+        if (reason instanceof DOMException && reason.name === "AbortError") return;
+        setOperations(null);
+        setOperationsError("Không đọc được health API");
+      });
+    return () => controller.abort();
+  }, [reloadToken]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -164,15 +212,19 @@ export default function Home() {
   }, [data, dataSource, fallbackData, region, selectedStation, servingMode]);
 
   useEffect(() => {
-    if (!selectedStation) return;
+    if (!selectedStation || explorerDeepLinkPending.current) return;
     const parameters = new URLSearchParams();
     parameters.set("region", region);
     parameters.set("station", selectedStation);
-    if (explorerFrom) parameters.set("from", explorerFrom);
-    if (explorerTo) parameters.set("to", explorerTo);
-    if (explorerNumber) parameters.set("number", explorerNumber);
+    const applied = explorerState.appliedQuery;
+    if (applied !== null && applied.region === region && applied.station === selectedStation &&
+      explorerQueryError(applied) === null) {
+      if (applied.from !== null) parameters.set("from", applied.from);
+      if (applied.to !== null) parameters.set("to", applied.to);
+      if (applied.number !== null) parameters.set("number", applied.number);
+    }
     window.history.replaceState(null, "", `${window.location.pathname}?${parameters}${window.location.hash}`);
-  }, [explorerFrom, explorerNumber, explorerTo, region, selectedStation]);
+  }, [explorerState.appliedQuery, region, selectedStation]);
 
   const analysis = useMemo(() => {
     if (!data || draws.length === 0) return null;
@@ -206,13 +258,19 @@ export default function Home() {
       },
     ];
     const models: ModelResult[] = modelDefinitions.map((model) => {
-      const result = backtest(draws, activeWindow, model.kind);
+      const benchmark = backtest(draws, {
+        datasetVersion: data.manifest.datasetVersion,
+        region,
+        stationCode: station.code,
+        kind: model.kind,
+        window: activeWindow,
+        topK: DEFAULT_TOP_K,
+        evaluationLimit: DEFAULT_EVALUATION_LIMIT,
+      });
       return {
         ...model,
-        picks: pickNumbers(analysisDraws, model.kind),
-        coverage: result.coverage,
-        lift: result.lift,
-        evaluationCount: result.evaluationCount,
+        picks: pickNumbers(analysisDraws, model.kind, DEFAULT_TOP_K),
+        benchmark,
       };
     });
 
@@ -230,7 +288,7 @@ export default function Home() {
       analysisDraws,
       filteredDraws: draws,
       station,
-      evaluationCount: models[0]?.evaluationCount ?? 0,
+      evaluationCount: models[0]?.benchmark.evaluationCount ?? 0,
       counts,
       drawGaps,
       maxFrequency,
@@ -241,55 +299,89 @@ export default function Home() {
       momentum,
       models,
     };
-  }, [activeWindow, data, draws, selectedStation]);
+  }, [activeWindow, data, draws, region, selectedStation]);
 
-  const runExplorer = async (cursor: string | null = null) => {
+  const resetExplorer = useCallback(() => {
+    explorerAbortController.current?.abort();
+    explorerAbortController.current = null;
+    setExplorerState(INITIAL_EXPLORER_STATE);
+  }, []);
+
+  const runExplorer = useCallback(async (append = false) => {
     if (!data || !selectedStation) return;
-    if ((explorerFrom && explorerTo && explorerTo < explorerFrom) ||
-      (explorerNumber && !/^\d{2}$/.test(explorerNumber))) {
-      setExplorerError("Khoảng ngày hoặc đuôi loto không hợp lệ.");
+    const query: ExplorerQuery | null = append
+      ? explorerState.appliedQuery
+      : {
+          region,
+          station: selectedStation,
+          from: explorerFrom || null,
+          to: explorerTo || null,
+          number: explorerNumber || null,
+        };
+    const cursor = append ? explorerState.cursor : null;
+    if (query === null || (append && cursor === null)) return;
+    const validationError = explorerQueryError(query);
+    if (validationError !== null) {
+      const started = beginExplorerRequest(INITIAL_EXPLORER_STATE, query, false);
+      setExplorerState(failExplorerRequest(started, query, validationError));
       return;
     }
+
     explorerAbortController.current?.abort();
     const controller = new AbortController();
     explorerAbortController.current = controller;
-    setExplorerLoading(true);
-    setExplorerError("");
+    setExplorerState((current) => beginExplorerRequest(current, query, append));
     try {
       if (servingMode === "v1") {
-        const matches = (fallbackData?.draws ?? [])
-          .filter((draw) => draw.stationCode === selectedStation)
-          .filter((draw) => !explorerFrom || draw.date >= explorerFrom)
-          .filter((draw) => !explorerTo || draw.date <= explorerTo)
-          .filter((draw) => !explorerNumber || draw.numbers.includes(explorerNumber))
-          .sort((left, right) => right.date.localeCompare(left.date))
-          .slice(0, 25);
-        setExplorerItems(matches);
-        setExplorerCursor(null);
+        const matches = fallbackData === null
+          ? []
+          : compatibilityExplorerItems(fallbackData, query, 25);
+        if (explorerAbortController.current !== controller) return;
+        setExplorerState((current) =>
+          completeExplorerRequest(current, query, matches, null, false)
+        );
         return;
       }
-      const parameters = new URLSearchParams({ region, station: selectedStation, limit: "25" });
-      if (explorerFrom) parameters.set("from", explorerFrom);
-      if (explorerTo) parameters.set("to", explorerTo);
-      if (explorerNumber) parameters.set("number", explorerNumber);
-      if (cursor) parameters.set("cursor", cursor);
-      const response = await fetch(`/api/v2/results?${parameters}`, { signal: controller.signal });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const payload: unknown = await response.json();
-      const page = normalizeLotteryV2ResultsPage(payload, region);
-      if (!page || page.releaseId !== data.manifest.datasetVersion) throw new Error("Invalid result page");
-      setExplorerItems(page.items);
-      setExplorerCursor(page.page.nextCursor);
+      const page = await fetchExplorerPage(query, data.manifest.datasetVersion, {
+        cursor,
+        limit: 25,
+        signal: controller.signal,
+      });
+      if (explorerAbortController.current !== controller) return;
+      setExplorerState((current) =>
+        completeExplorerRequest(current, query, page.items, page.page.nextCursor, append)
+      );
     } catch (reason: unknown) {
       if (reason instanceof DOMException && reason.name === "AbortError") return;
-      setExplorerError("Không thể tra cứu. Kiểm tra khoảng ngày và thử lại.");
+      if (explorerAbortController.current !== controller) return;
+      const message = reason instanceof ExplorerPageError &&
+        (reason.code === "invalid_cursor" || reason.code === "stale_release")
+        ? "Dữ liệu vừa được cập nhật. Bấm “Tra kết quả” để tải lại từ đầu."
+        : "Không thể tra cứu. Kiểm tra khoảng ngày và thử lại.";
+      setExplorerState((current) => failExplorerRequest(current, query, message));
     } finally {
       if (explorerAbortController.current === controller) {
         explorerAbortController.current = null;
-        setExplorerLoading(false);
       }
     }
-  };
+  }, [
+    data,
+    explorerFrom,
+    explorerNumber,
+    explorerState.appliedQuery,
+    explorerState.cursor,
+    explorerTo,
+    fallbackData,
+    region,
+    selectedStation,
+    servingMode,
+  ]);
+
+  useEffect(() => {
+    if (!data || !selectedStation || !explorerDeepLinkPending.current) return;
+    explorerDeepLinkPending.current = false;
+    void runExplorer();
+  }, [data, runExplorer, selectedStation]);
 
   if (error) {
     return (
@@ -314,6 +406,31 @@ export default function Home() {
   const latestDraw = analysis.filteredDraws.at(-1);
   if (!latestDraw) return <DashboardLoading />;
 
+  const regionalHealth = operations?.health.regions[region] ?? null;
+  const unhealthyRegions = operations
+    ? LOTTERY_REGIONS.filter((candidate) => !operations.health.regions[candidate].healthy)
+    : [];
+  const watchdogState = operations?.watchdog?.state ?? null;
+  const watchdogLabel = watchdogState?.status === "healthy"
+    ? "HEALTHY"
+    : watchdogState?.status === "warning"
+      ? "WARNING"
+      : watchdogState?.status === "critical"
+        ? "CRITICAL"
+        : watchdogState?.status === "pending"
+          ? "PENDING"
+          : "NO EVIDENCE";
+  const watchdogDot = watchdogState?.status === "healthy"
+    ? "good"
+    : watchdogState?.status === "warning" || watchdogState?.status === "critical"
+      ? "bad"
+      : "pending";
+  const lineageHealthy = dataSource === "r2" &&
+    data.freshness.matchesManifestTarget &&
+    (regionalHealth?.datasetVersion === null ||
+      regionalHealth?.datasetVersion === undefined ||
+      regionalHealth.datasetVersion === data.manifest.datasetVersion);
+
   const runModels = () => {
     setActiveWindow(selectedWindow);
     setLastRun(
@@ -323,11 +440,33 @@ export default function Home() {
     );
   };
 
+  const downloadBenchmarkReport = () => {
+    const report = buildBenchmarkReport({
+      datasetVersion: data.manifest.datasetVersion,
+      region,
+      stationCode: analysis.station.code,
+      stationName: analysis.station.name,
+      selectedWindow: activeWindow,
+      modelKinds: MODEL_KINDS,
+      windows: WINDOW_OPTIONS,
+      benchmarks: analysis.models.map((model) => model.benchmark),
+    });
+    const url = URL.createObjectURL(
+      new Blob([`${JSON.stringify(report, null, 2)}\n`], { type: "application/json" }),
+    );
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = benchmarkReportFilename(report);
+    anchor.hidden = true;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+  };
+
   const chooseRegion = (nextRegion: LotteryRegion) => {
     if (nextRegion === region) return;
-    explorerAbortController.current?.abort();
-    explorerAbortController.current = null;
-    setExplorerLoading(false);
+    resetExplorer();
     requestedStation.current = "";
     setExplorerFrom("");
     setExplorerTo("");
@@ -336,23 +475,16 @@ export default function Home() {
     setData(null);
     setFallbackData(null);
     setDraws([]);
-    setExplorerItems([]);
-    setExplorerCursor(null);
     setError("");
     setHistoryError("");
     setRegion(nextRegion);
   };
 
   const chooseStation = (station: string) => {
-    explorerAbortController.current?.abort();
-    explorerAbortController.current = null;
-    setExplorerLoading(false);
+    resetExplorer();
     requestedStation.current = station;
     setSelectedStation(station);
     setDraws([]);
-    setExplorerItems([]);
-    setExplorerCursor(null);
-    setExplorerError("");
     setHistoryError("");
   };
 
@@ -449,11 +581,25 @@ export default function Home() {
           </label>
           <label>
             Từ ngày
-            <input type="date" value={explorerFrom} onChange={(event) => setExplorerFrom(event.target.value)} />
+            <input
+              type="date"
+              value={explorerFrom}
+              onChange={(event) => {
+                resetExplorer();
+                setExplorerFrom(event.target.value);
+              }}
+            />
           </label>
           <label>
             Đến ngày
-            <input type="date" value={explorerTo} onChange={(event) => setExplorerTo(event.target.value)} />
+            <input
+              type="date"
+              value={explorerTo}
+              onChange={(event) => {
+                resetExplorer();
+                setExplorerTo(event.target.value);
+              }}
+            />
           </label>
           <label>
             Đuôi loto
@@ -464,19 +610,34 @@ export default function Home() {
               maxLength={2}
               placeholder="00–99"
               value={explorerNumber}
-              onChange={(event) => setExplorerNumber(event.target.value.replace(/\D/g, "").slice(0, 2))}
+              onChange={(event) => {
+                resetExplorer();
+                setExplorerNumber(event.target.value.replace(/\D/g, "").slice(0, 2));
+              }}
             />
           </label>
-          <button type="submit" disabled={explorerLoading}>
-            {explorerLoading ? "Đang tra…" : "Tra kết quả"}
+          <button type="submit" disabled={explorerState.status === "loading"}>
+            {explorerState.status === "loading" && !explorerState.appending ? "Đang tra…" : "Tra kết quả"}
           </button>
         </form>
-        {explorerError && <p className="explorer-message error" role="alert">{explorerError}</p>}
-        {!explorerError && explorerItems.length === 0 && (
+        {explorerState.status === "error" && explorerState.error && (
+          <p className="explorer-message error" role="alert">{explorerState.error}</p>
+        )}
+        {explorerState.status === "idle" && (
           <p className="explorer-message">Chọn bộ lọc rồi bấm “Tra kết quả”. Đặt hai ngày giống nhau để tra đúng một kỳ.</p>
         )}
-        <div className="result-list" aria-live="polite">
-          {explorerItems.map((draw) => (
+        {explorerState.status === "loading" && explorerState.items.length === 0 && (
+          <p className="explorer-message" role="status">Đang tìm trong lịch sử đã publish…</p>
+        )}
+        {explorerState.status === "empty" && (
+          <p className="explorer-message" role="status">Không tìm thấy kỳ quay phù hợp với bộ lọc đã áp dụng.</p>
+        )}
+        <div
+          className="result-list"
+          aria-busy={explorerState.status === "loading"}
+          aria-live="polite"
+        >
+          {explorerState.items.map((draw) => (
             <article className="result-card" key={`${draw.stationCode}-${draw.date}`}>
               <header>
                 <div><small>{draw.stationName}</small><h3>{formatDate(draw.date)}</h3></div>
@@ -489,7 +650,8 @@ export default function Home() {
                     <div>
                       {prizes.map((prize, index) => (
                         <strong
-                          className={explorerNumber && prize.endsWith(explorerNumber) ? "matched" : ""}
+                          className={explorerState.appliedQuery?.number &&
+                            prize.endsWith(explorerState.appliedQuery.number) ? "matched" : ""}
                           key={`${prize}-${index}`}
                         >
                           {prize}
@@ -502,14 +664,14 @@ export default function Home() {
             </article>
           ))}
         </div>
-        {explorerCursor && (
+        {explorerState.cursor && explorerState.appliedQuery && (
           <button
             className="next-page"
             type="button"
-            disabled={explorerLoading}
-            onClick={() => void runExplorer(explorerCursor)}
+            disabled={explorerState.status === "loading"}
+            onClick={() => void runExplorer(true)}
           >
-            Trang tiếp theo →
+            {explorerState.appending ? "Đang tải thêm…" : "Tải thêm kết quả →"}
           </button>
         )}
       </section>
@@ -567,14 +729,47 @@ export default function Home() {
                 ))}
               </div>
               <div className="model-stats">
-                <div><small>Coverage</small><strong>{percentFormatter.format(model.coverage)}</strong></div>
-                <div><small>Lift / baseline</small><strong>{model.lift.toFixed(2)}×</strong></div>
+                <div>
+                  <small>Coverage</small>
+                  <strong>{percentFormatter.format(model.benchmark.coverage)}</strong>
+                </div>
+                <div>
+                  <small>95% CI</small>
+                  <strong>
+                    {percentFormatter.format(model.benchmark.coverageConfidenceInterval.lower)}
+                    {" — "}
+                    {percentFormatter.format(model.benchmark.coverageConfidenceInterval.upper)}
+                  </strong>
+                </div>
+                <div>
+                  <small>Hit rate</small>
+                  <strong>{percentFormatter.format(model.benchmark.hitRate)}</strong>
+                </div>
+                <div>
+                  <small>Lift / baseline</small>
+                  <strong>{model.benchmark.lift.toFixed(2)}×</strong>
+                </div>
               </div>
-              <p className="model-sample">{model.evaluationCount} kỳ đánh giá · không nhìn trước</p>
+              <p className="model-sample">
+                {model.benchmark.evaluationCount} kỳ · {formatDate(model.benchmark.evaluationRange.from)}
+                {" — "}
+                {formatDate(model.benchmark.evaluationRange.to)} · không nhìn trước
+              </p>
+              <code className="model-fingerprint">{model.benchmark.fingerprint}</code>
             </article>
           ))}
         </div>
-        <p className="model-warning"><strong>{ANALYTICS_MODEL_VERSION}</strong> · baseline {percentFormatter.format(BASELINE_COVERAGE)}. Các model là heuristic mô tả và backtest, không phải dự báo xác suất trúng hay khuyến nghị đặt cược.</p>
+        <div className="benchmark-actions">
+          <p className="model-warning">
+            <strong>{ANALYTICS_MODEL_VERSION}</strong> · baseline {percentFormatter.format(BASELINE_COVERAGE)}.
+            {" "}12 lựa chọn model/cửa sổ (3 × 4) là phân tích khám phá; chọn lặp lại có thể làm kết quả
+            trông tốt hơn thực tế. Đây là heuristic mô tả và backtest, không phải dự báo xác suất trúng
+            hay khuyến nghị đặt cược.
+          </p>
+          <button className="benchmark-download" type="button" onClick={downloadBenchmarkReport}>
+            Tải benchmark JSON
+          </button>
+        </div>
       </section>
 
       <section className="analysis-grid" id="heatmap">
@@ -632,10 +827,46 @@ export default function Home() {
           <p>Dashboard chỉ đọc JSON gọn qua API Worker. Gold Parquet và credential không bao giờ được gửi xuống trình duyệt.</p>
         </div>
         <div className="health-grid">
-          <article><span className="health-dot good" /><div><small>Dataset version</small><strong>{data.manifest.datasetVersion}</strong></div><em>{dataSource === "r2" ? "R2" : "DEMO"}</em></article>
-          <article><span className={`health-dot ${data.freshness.matchesManifestTarget ? "good" : "pending"}`} /><div><small>Ngày mới nhất</small><strong>{formatDate(latestDraw.date)}</strong></div><em>{data.freshness.matchesManifestTarget ? "SYNCED" : "LAG"}</em></article>
-          <article><span className="health-dot good" /><div><small>Miền dữ liệu</small><strong>{regionName(region)}</strong></div><em>{region.toUpperCase()}</em></article>
-          <article><span className="health-dot good" /><div><small>Đài đang phân tích</small><strong>{analysis.station.name}</strong></div><em>{analysis.station.code.toUpperCase()}</em></article>
+          <article>
+            <span className={`health-dot ${operations?.health.healthy ? "good" : operations ? "bad" : "pending"}`} />
+            <div>
+              <small>Serving health</small>
+              <strong>
+                {operations?.health.healthy
+                  ? "3/3 miền đạt chuẩn"
+                  : operations
+                    ? `Lỗi: ${unhealthyRegions.map((item) => item.toUpperCase()).join(", ")}`
+                    : operationsError || "Đang chờ health API"}
+              </strong>
+            </div>
+            <em>{operations ? `TARGET ${formatDate(operations.health.expectedTargetDate)}` : "UNAVAILABLE"}</em>
+          </article>
+          <article title={regionalHealth?.issues.join("; ") || undefined}>
+            <span className={`health-dot ${regionalHealth?.healthy ? "good" : regionalHealth ? "bad" : "pending"}`} />
+            <div>
+              <small>{region.toUpperCase()} mới nhất</small>
+              <strong>
+                {formatDate(regionalHealth?.latestDrawDate ?? latestDraw.date)}
+              </strong>
+            </div>
+            <em>{regionalHealth?.healthy ? "REGION OK" : regionalHealth ? "ISSUES" : "NO STATUS"}</em>
+          </article>
+          <article>
+            <span className={`health-dot ${watchdogDot}`} />
+            <div>
+              <small>Watchdog gần nhất</small>
+              <strong>{formatTimestamp(watchdogState?.lastObservedAt)}</strong>
+            </div>
+            <em>{watchdogLabel}</em>
+          </article>
+          <article>
+            <span className={`health-dot ${lineageHealthy ? "good" : dataSource === "r2" ? "bad" : "pending"}`} />
+            <div>
+              <small>Dataset lineage · {analysis.station.code.toUpperCase()}</small>
+              <strong>{data.manifest.datasetVersion}</strong>
+            </div>
+            <em>{dataSource === "r2" ? (lineageHealthy ? "R2 SYNCED" : "R2 MISMATCH") : "DEMO"}</em>
+          </article>
         </div>
       </section>
 

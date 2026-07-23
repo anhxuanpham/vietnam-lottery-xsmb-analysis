@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { normalizeLotteryWatchdogStatus } from "../lottery-contract.ts";
 import {
   evaluateLotteryHealth,
   expectedLotteryTargetDate,
   handleLotteryHealthRequest,
 } from "../worker/health.ts";
 import { WATCHDOG_STATE_KEY } from "../worker/ops-ledger.ts";
+import { handleLotteryWatchdogStatus } from "../worker/ops-status.ts";
 import {
   AlertDeliveryError,
   runLotteryWatchdog,
@@ -270,6 +272,54 @@ test("health returns structured 503 for stale, missing, and malformed regional d
   assert.ok(report.regions.xsmn.issues.includes("target_date_mismatch"));
   assert.deepEqual(report.regions.xsmt.issues, ["object_missing"]);
   assert.equal(Object.hasOwn(report.regions.xsmb, "error"), false);
+});
+
+test("watchdog status exposes redacted persisted state and handles missing state", async () => {
+  const bucket = new MemoryBucket();
+  const missingResponse = await handleLotteryWatchdogStatus(
+    new Request("https://lottery.example/api/ops/lottery"),
+    { LOTTERY_DATA: bucket },
+  );
+  assert.equal(missingResponse.status, 200);
+  assert.deepEqual(await missingResponse.json(), {
+    schemaVersion: 1,
+    service: "lottery-watchdog",
+    available: false,
+    state: null,
+  });
+
+  bucket.setJson(WATCHDOG_STATE_KEY, {
+    schemaVersion: 1,
+    status: "warning",
+    expectedTargetDate: "2026-07-21",
+    incidentId: "private-incident-id",
+    openedAt: "2026-07-21T13:15:00.000Z",
+    lastObservedAt: "2026-07-21T13:30:00.000Z",
+    notifiedSeverity: "warning",
+  });
+  const response = await handleLotteryWatchdogStatus(
+    new Request("https://lottery.example/api/ops/lottery"),
+    { LOTTERY_DATA: bucket },
+  );
+  const status = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  assert.equal(response.headers.get("x-lottery-source"), "r2");
+  assert.equal(status.available, true);
+  assert.equal(status.state.activeIncident, true);
+  assert.equal(status.state.status, "warning");
+  assert.equal(JSON.stringify(status).includes("private-incident-id"), false);
+  assert.deepEqual(normalizeLotteryWatchdogStatus(status), status);
+});
+
+test("watchdog status rejects non-GET methods", async () => {
+  const response = await handleLotteryWatchdogStatus(
+    new Request("https://lottery.example/api/ops/lottery", { method: "POST" }),
+    { LOTTERY_DATA: new MemoryBucket() },
+  );
+  assert.equal(response.status, 405);
+  assert.equal(response.headers.get("allow"), "GET");
 });
 
 test("watchdog deduplicates warnings, escalates critical, records evidence, and sends recovery", async () => {

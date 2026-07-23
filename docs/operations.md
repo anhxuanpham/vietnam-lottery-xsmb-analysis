@@ -103,9 +103,9 @@ are evidence to investigate; the command never writes data or reclassifies an un
 
 ## Dashboard publication
 
-`Publish Lottery Dashboard Data` runs daily at 19:47 Vietnam time, away from GitHub's top-of-hour scheduling hotspot,
-after the 18:35 Daily ETL window, and can also be dispatched manually. It first runs the metadata-only three-lake
-health gate and requires all three publication dates
+`Publish Lottery Dashboard Data` is event-chained from a successful scheduled `Daily Vietnam Lottery ETL` run and can
+also be dispatched manually. It does not own a second daily cron, so publication follows the actual ETL completion
+instead of another scheduler queue. It first runs the metadata-only three-lake health gate and requires all three publication dates
 to match the expected draw date (yesterday before 18:35, today from 18:35 onward). It then runs the complete-history
 audit for all three lakes through that same date. Any checksum, calendar, fact-grain, loto-grain, station-dimension, or
 station-schedule finding blocks publication. JSON reports produced by the gates are retained as a workflow artifact
@@ -113,7 +113,10 @@ for 30 days.
 If a gate fails before it can emit valid JSON, the artifact retains the report from any earlier completed gate.
 After both gates pass, the workflow downloads only the published
 `fact-draw-result.parquet` plus `dim-station.parquet` where applicable, exports 455 recent draws per station, and
-uploads compact JSON plus immutable v2 station/year shards to the Sites Worker. V2 metadata moves last. The three
+uploads compact JSON plus immutable v2 station/year shards to the Sites Worker. It validates the complete shard list,
+path shape, region, release ID, and declared shard count before upload starts. Shards use bounded parallelism `8`; each
+failure records a bounded response diagnostic, any failure blocks the region pointer, and v2 metadata always moves
+last. The job summary records per-region shard count, upload seconds, total seconds, and the overall total. The three
 source lakes stay private; the browser only reads the separate `LOTTERY_DATA` serving bucket. Before moving the v2
 pointer, the Worker checks that it matches the currently published compact boundary, is not a rollback, and that every
 declared shard exists and passes its contract. The workflow then probes health, metadata, and one result for each region.
@@ -138,6 +141,9 @@ after all three regional pointers have been published once, so deploying the Wor
 not create a false outage; after activation, missing/invalid/stale v2 metadata makes health fail. This Sites deployment is
 owner-only, so an external probe must include
 `OAI-Sites-Authorization: Bearer $DASHBOARD_SITES_BYPASS_TOKEN`; an unauthenticated request correctly returns `401`.
+`GET /api/ops/lottery` returns the read-only redacted watchdog state. It returns `200` with `available=false` before
+the first persisted observation; otherwise it includes status, expected target, last observation, incident-active flag,
+opened time, and notified severity without exposing the incident ID or webhook configuration.
 The internal Cloudflare cron does not need that header. It runs every 15 minutes from 20:00 through 22:45 Vietnam
 time, writes watchdog state, an append-only ledger and incident/recovery evidence to `LOTTERY_DATA`; warning starts
 at 20:00 and escalates at 20:30. Configure the optional HTTPS runtime secret `ALERT_WEBHOOK_URL` to deliver
@@ -149,7 +155,8 @@ Daily Gold contains Parquet only. `Export Lottery CSV Snapshots` runs weekly and
 `exports/csv/run-id=<run>/*.csv`, an immutable manifest, then CAS-updates `exports/csv/latest.json`. BI must resolve
 that pointer instead of assuming `gold/latest`.
 
-`Backup Published Lottery Releases` copies the exact manifest-selected Gold/run/snapshot/ControlState boundary to
+`Backup Published Lottery Releases` is event-chained from every successful dashboard publication and still supports
+manual dispatch. It copies the exact manifest-selected Gold/run/snapshot/ControlState boundary to
 `R2_BACKUP_BUCKET_NAME`, verifies every checksum, restores it into a fresh local directory, and checks all three
 restored regions. Prefer dedicated `R2_BACKUP_ACCOUNT_ID`, `R2_BACKUP_ACCESS_KEY_ID`, and
 `R2_BACKUP_SECRET_ACCESS_KEY` so a primary credential failure does not remove the backup failure domain.

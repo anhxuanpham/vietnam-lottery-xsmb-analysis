@@ -8,9 +8,9 @@ import {
 } from "../lottery-contract.ts";
 
 export const VIETNAM_UTC_OFFSET_MINUTES = 7 * 60;
-// The dashboard publisher is scheduled for 19:47 Vietnam time. Treat today's
-// target as due from 20:00 so normal publication latency does not make the
-// public health endpoint flap every evening.
+// The dashboard publisher follows the scheduled Daily ETL. Treat today's target
+// as due from 20:00 so normal ETL and event-chain latency does not make the
+// health endpoint flap immediately after the 18:35 draw cutoff.
 export const DEFAULT_TARGET_ROLLOVER_MINUTE = 20 * 60;
 export const MAX_HEALTH_OBJECT_BYTES = 8 * 1024 * 1024;
 export const MAX_V2_METADATA_BYTES = 100 * 1024;

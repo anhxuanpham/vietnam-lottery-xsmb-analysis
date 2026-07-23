@@ -2,9 +2,11 @@ name: Publish Lottery Dashboard Data
 
 on:
   workflow_dispatch:
-  schedule:
-    # Avoid the top-of-hour GitHub Actions scheduling hotspot.
-    - cron: "47 12 * * *"
+  workflow_run:
+    workflows:
+      - Daily Vietnam Lottery ETL
+    types:
+      - completed
 
 permissions:
   contents: read
@@ -15,6 +17,13 @@ concurrency:
 
 jobs:
   publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.event == 'schedule' &&
+        github.event.workflow_run.conclusion == 'success'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -110,6 +119,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          readonly upload_parallelism=8
+          publish_started_epoch="$(date +%s)"
+          total_shard_count=0
           request_headers=(
             -H "Authorization: Bearer $DASHBOARD_INGEST_TOKEN"
             -H "Content-Type: application/json"
@@ -120,7 +132,57 @@ jobs:
             )
           fi
 
+          upload_v2_shard() {
+            set -euo pipefail
+            local shard="$1"
+            local region="$2"
+            local release="$3"
+            local station="$4"
+            local year="$5"
+            local shard_response
+            local failure_file
+            local -a shard_headers=(
+              -H "Authorization: Bearer $DASHBOARD_INGEST_TOKEN"
+              -H "Content-Type: application/json"
+            )
+            if [[ -n "${DASHBOARD_SITES_BYPASS_TOKEN:-}" ]]; then
+              shard_headers+=(
+                -H "OAI-Sites-Authorization: Bearer $DASHBOARD_SITES_BYPASS_TOKEN"
+              )
+            fi
+
+            shard_response="$(mktemp)"
+            if ! curl \
+              --fail-with-body \
+              --show-error \
+              --silent \
+              --retry 3 \
+              --retry-all-errors \
+              --request PUT \
+              "${shard_headers[@]}" \
+              --data-binary "@$shard" \
+              --output "$shard_response" \
+              "${DASHBOARD_INGEST_BASE}/api/admin/lottery-v2?kind=shard&region=${region}&release=${release}&station=${station}&year=${year}"; then
+              failure_file="$(mktemp "$SHARD_FAILURE_DIR/failure.XXXXXX")"
+              {
+                printf 'V2 shard upload failed: region=%s release=%s station=%s year=%s path=%s\n' \
+                  "$region" "$release" "$station" "$year" "$shard"
+                if [[ -s "$shard_response" ]]; then
+                  head -c 2048 "$shard_response"
+                  echo
+                fi
+              } > "$failure_file"
+              rm -f "$shard_response"
+              return 1
+            fi
+            rm -f "$shard_response"
+          }
+          export -f upload_v2_shard
+          export DASHBOARD_INGEST_TOKEN DASHBOARD_SITES_BYPASS_TOKEN
+          export DASHBOARD_INGEST_BASE="${DASHBOARD_INGEST_URL%/api/admin/lottery}"
+
           for region in xsmb xsmn xsmt; do
+            region_started_epoch="$(date +%s)"
             output="/tmp/${region}-dashboard.json"
             v2_root="/tmp/${region}-serving-v2"
             uv run python scripts/export_serving_data.py \
@@ -142,25 +204,17 @@ jobs:
             ' "$metadata" >/dev/null
             metadata_release="$(jq -er '.releaseId' "$metadata")"
             expected_shard_count="$(jq -er '[.stations[].years[]] | length' "$metadata")"
-            curl \
-              --fail-with-body \
-              --show-error \
-              --silent \
-              --retry 3 \
-              --request PUT \
-              "${request_headers[@]}" \
-              --data-binary "@$output" \
-              "${DASHBOARD_INGEST_URL}?region=${region}"
 
             shard_count=0
             shard_list="$(mktemp)"
+            upload_manifest="$(mktemp)"
             if ! find "$v2_root/v2/releases" -type f -name '*.json' -print0 | sort -z > "$shard_list"; then
               echo "Unable to enumerate v2 shards for $region" >&2
               exit 1
             fi
             while IFS= read -r -d '' shard; do
               relative="${shard#"$v2_root"/}"
-              if [[ ! "$relative" =~ ^v2/releases/([^/]+)/regions/([^/]+)/stations/([^/]+)/years/([0-9]{4})\.json$ ]]; then
+              if [[ ! "$relative" =~ ^v2/releases/([A-Za-z0-9._-]+)/regions/(xsmb|xsmn|xsmt)/stations/([A-Za-z0-9._-]+)/years/([0-9]{4})\.json$ ]]; then
                 echo "Unexpected v2 shard path: $relative" >&2
                 exit 1
               fi
@@ -176,37 +230,50 @@ jobs:
                 echo "V2 shard release mismatch: $relative" >&2
                 exit 1
               fi
-              shard_response="$(mktemp)"
-              if ! curl \
-                --fail-with-body \
-                --show-error \
-                --silent \
-                --retry 3 \
-                --request PUT \
-                "${request_headers[@]}" \
-                --data-binary "@$shard" \
-                --output "$shard_response" \
-                "${DASHBOARD_INGEST_URL%/api/admin/lottery}/api/admin/lottery-v2?kind=shard&region=${region}&release=${release}&station=${station}&year=${year}"; then
-                echo "V2 shard upload failed: $relative" >&2
-                head -c 2048 "$shard_response" >&2
-                echo >&2
-                rm -f "$shard_response" "$shard_list"
-                exit 1
-              fi
-              rm -f "$shard_response"
+              printf '%s\0%s\0%s\0%s\0%s\0' \
+                "$shard" "$region" "$release" "$station" "$year" >> "$upload_manifest"
               shard_count=$((shard_count + 1))
             done < "$shard_list"
             rm -f "$shard_list"
 
             if (( shard_count != expected_shard_count )); then
-              echo "V2 shard count mismatch for $region: uploaded=$shard_count expected=$expected_shard_count" >&2
+              echo "V2 shard count mismatch for $region: validated=$shard_count expected=$expected_shard_count" >&2
               exit 1
             fi
+
             curl \
               --fail-with-body \
               --show-error \
               --silent \
               --retry 3 \
+              --retry-all-errors \
+              --request PUT \
+              "${request_headers[@]}" \
+              --data-binary "@$output" \
+              "${DASHBOARD_INGEST_URL}?region=${region}"
+
+            SHARD_FAILURE_DIR="$(mktemp -d)"
+            export SHARD_FAILURE_DIR
+            shard_upload_started_epoch="$(date +%s)"
+            if ! xargs -0 -r -n 5 -P "$upload_parallelism" \
+              bash -c 'upload_v2_shard "$@"' _ < "$upload_manifest"; then
+              echo "One or more V2 shard uploads failed for $region." >&2
+              while IFS= read -r failure; do
+                [[ -n "$failure" ]] || continue
+                cat "$failure" >&2
+              done < <(find "$SHARD_FAILURE_DIR" -type f -name 'failure.*' -print | sort)
+              rm -f "$upload_manifest"
+              exit 1
+            fi
+            shard_upload_seconds=$(( $(date +%s) - shard_upload_started_epoch ))
+            rm -f "$upload_manifest"
+
+            curl \
+              --fail-with-body \
+              --show-error \
+              --silent \
+              --retry 3 \
+              --retry-all-errors \
               --request PUT \
               "${request_headers[@]}" \
               --data-binary "@$metadata" \
@@ -215,9 +282,23 @@ jobs:
             jq -cn \
               --arg region "$region" \
               --argjson shards "$shard_count" \
-              '{region: $region, shards: $shards, metadataPublished: true}' \
+              --argjson parallelism "$upload_parallelism" \
+              --argjson uploadSeconds "$shard_upload_seconds" \
+              --argjson totalSeconds "$(( $(date +%s) - region_started_epoch ))" \
+              '{
+                region: $region,
+                shards: $shards,
+                uploadParallelism: $parallelism,
+                uploadSeconds: $uploadSeconds,
+                totalSeconds: $totalSeconds,
+                metadataPublished: true
+              }' \
               >> serving-v2-summary.jsonl
+            total_shard_count=$((total_shard_count + shard_count))
           done
+
+          echo "shard_count=$total_shard_count" >> "$GITHUB_OUTPUT"
+          echo "elapsed_seconds=$(( $(date +%s) - publish_started_epoch ))" >> "$GITHUB_OUTPUT"
 
       - name: Verify private serving APIs and v2 releases
         id: serving_api
@@ -242,6 +323,32 @@ jobs:
             --output serving-health.json \
             "$base_url/api/health/lottery"
           jq --exit-status '.healthy == true and .v2Required == true' serving-health.json >/dev/null
+
+          curl \
+            --fail-with-body \
+            --show-error \
+            --silent \
+            --retry 3 \
+            --retry-all-errors \
+            "${serving_headers[@]}" \
+            --output serving-ops.json \
+            "$base_url/api/ops/lottery"
+          jq --exit-status '
+            .schemaVersion == 1 and
+            .service == "lottery-watchdog" and
+            (.available | type == "boolean") and
+            (
+              (.available == false and .state == null) or
+              (
+                .available == true and
+                (.state.status == "healthy" or .state.status == "pending" or
+                  .state.status == "warning" or .state.status == "critical") and
+                (.state.expectedTargetDate | type == "string") and
+                (.state.lastObservedAt | type == "string") and
+                (.state.activeIncident | type == "boolean")
+              )
+            )
+          ' serving-ops.json >/dev/null
 
           for region in xsmb xsmn xsmt; do
             metadata="serving-${region}-metadata.json"
@@ -281,6 +388,7 @@ jobs:
             history-audit.json
             serving-v2-summary.jsonl
             serving-health.json
+            serving-ops.json
             serving-*-metadata.json
             serving-*-results.json
           if-no-files-found: warn
@@ -311,14 +419,25 @@ jobs:
             if [[ -s serving-v2-summary.jsonl ]]; then
               echo "" >> "$GITHUB_STEP_SUMMARY"
               echo "#### Historical API v2" >> "$GITHUB_STEP_SUMMARY"
-              jq -r '"- \(.region | ascii_upcase): \(.shards) immutable station/year shards + metadata pointer"' \
+              jq -r '"- \(.region | ascii_upcase): \(.shards) immutable station/year shards, parallelism=\(.uploadParallelism), upload=\(.uploadSeconds)s, total=\(.totalSeconds)s + metadata pointer"' \
                 serving-v2-summary.jsonl >> "$GITHUB_STEP_SUMMARY"
+              if [[ "${{ steps.publish_payloads.outcome }}" == "success" ]]; then
+                echo "- Total: ${{ steps.publish_payloads.outputs.shard_count }} shards in ${{ steps.publish_payloads.outputs.elapsed_seconds }}s" \
+                  >> "$GITHUB_STEP_SUMMARY"
+              fi
             fi
             if [[ -s serving-health.json ]] && jq empty serving-health.json >/dev/null 2>&1; then
               echo "" >> "$GITHUB_STEP_SUMMARY"
               echo "#### Serving API smoke" >> "$GITHUB_STEP_SUMMARY"
               jq -r '"- health=\(.healthy), v2Required=\(.v2Required), target=\(.expectedTargetDate)"' \
                 serving-health.json >> "$GITHUB_STEP_SUMMARY"
+              if [[ -s serving-ops.json ]] && jq empty serving-ops.json >/dev/null 2>&1; then
+                jq -r 'if .available then
+                  "- watchdog=\(.state.status), lastObservedAt=\(.state.lastObservedAt)"
+                else
+                  "- watchdog evidence is not available yet"
+                end' serving-ops.json >> "$GITHUB_STEP_SUMMARY"
+              fi
             fi
 
             echo "" >> "$GITHUB_STEP_SUMMARY"

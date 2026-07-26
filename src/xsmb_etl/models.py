@@ -42,6 +42,69 @@ PRIZE_SPECS: dict[PrizeGroup, PrizeSpec] = {
 EXPECTED_RESULT_COUNT = sum(spec.count for spec in PRIZE_SPECS.values())
 
 
+def validate_prize_against_spec(prize: Any, specs: Mapping[Any, Any]) -> None:
+    """Enforce the official width, order, and numeric range for one prize's group."""
+
+    spec = specs[prize.prize_group]
+    if prize.prize_width != spec.width:
+        raise ValueError(f'{prize.prize_group.value} must use width {spec.width}')
+    if prize.prize_order > spec.count:
+        raise ValueError(f'{prize.prize_group.value} order must be at most {spec.count}')
+    if prize.full_number >= 10**prize.prize_width:
+        raise ValueError(f'{prize.prize_group.value} value is outside its numeric range')
+
+
+def validate_group_completeness(result: Any, specs: Mapping[Any, Any]) -> None:
+    """Require every group's exact prize count with unique, consecutive prize orders."""
+
+    for group, spec in specs.items():
+        group_prizes = result.prizes_for(group)
+        if len(group_prizes) != spec.count:
+            raise ValueError(f'{group.value} expected {spec.count} values, got {len(group_prizes)}')
+        if [prize.prize_order for prize in group_prizes] != list(range(1, spec.count + 1)):
+            raise ValueError(f'{group.value} prize order must be unique and consecutive')
+
+
+def prizes_from_groups(
+    groups: Mapping[Any, Sequence[str | int]],
+    *,
+    group_enum: type[StrEnum],
+    specs: Mapping[Any, Any],
+    prize_class: type[Any],
+) -> tuple[Any, ...]:
+    """Parse grouped raw values into validated prizes ordered by the official spec table."""
+
+    normalized: dict[Any, Sequence[str | int]] = {}
+    for raw_group, values in groups.items():
+        group = raw_group if isinstance(raw_group, group_enum) else group_enum(raw_group)
+        if group in normalized:
+            raise ValueError(f'duplicate group: {group.value}')
+        normalized[group] = values
+
+    prizes = []
+    for group, spec in specs.items():
+        values = normalized.get(group, ())
+        if len(values) != spec.count:
+            raise ValueError(f'{group.value} expected {spec.count} values, got {len(values)}')
+        for order, raw_value in enumerate(values, start=1):
+            text = str(raw_value).strip()
+            if isinstance(raw_value, bool) or not text.isascii() or not text.isdigit():
+                raise ValueError(f'{group.value} value must contain only ASCII digits')
+            if isinstance(raw_value, str) and len(text) != spec.width:
+                raise ValueError(f'{group.value} value must contain exactly {spec.width} digits')
+            if len(text) > spec.width:
+                raise ValueError(f'{group.value} value must contain exactly {spec.width} digits')
+            prizes.append(
+                prize_class(
+                    prize_group=group,
+                    prize_order=order,
+                    prize_width=spec.width,
+                    full_number=int(text),
+                )
+            )
+    return tuple(prizes)
+
+
 class Prize(BaseModel):
     """One prize with explicit width so leading zeros remain meaningful."""
 
@@ -62,13 +125,7 @@ class Prize(BaseModel):
 
     @model_validator(mode='after')
     def validate_against_group_spec(self) -> Prize:
-        spec = PRIZE_SPECS[self.prize_group]
-        if self.prize_width != spec.width:
-            raise ValueError(f'{self.prize_group.value} must use width {spec.width}')
-        if self.prize_order > spec.count:
-            raise ValueError(f'{self.prize_group.value} order must be at most {spec.count}')
-        if self.full_number >= 10**self.prize_width:
-            raise ValueError(f'{self.prize_group.value} value is outside its numeric range')
+        validate_prize_against_spec(self, PRIZE_SPECS)
         return self
 
 
@@ -85,13 +142,7 @@ class LotteryResult(BaseModel):
     def validate_complete_draw(self) -> LotteryResult:
         if len(self.prizes) != EXPECTED_RESULT_COUNT:
             raise ValueError(f'a draw must contain exactly {EXPECTED_RESULT_COUNT} prizes')
-
-        for group, spec in PRIZE_SPECS.items():
-            group_prizes = self.prizes_for(group)
-            if len(group_prizes) != spec.count:
-                raise ValueError(f'{group.value} expected {spec.count} values, got {len(group_prizes)}')
-            if [prize.prize_order for prize in group_prizes] != list(range(1, spec.count + 1)):
-                raise ValueError(f'{group.value} prize order must be unique and consecutive')
+        validate_group_completeness(self, PRIZE_SPECS)
         return self
 
     @classmethod
@@ -101,37 +152,8 @@ class LotteryResult(BaseModel):
         source_url: str,
         groups: Mapping[str | PrizeGroup, Sequence[str | int]],
     ) -> LotteryResult:
-        normalized: dict[PrizeGroup, Sequence[str | int]] = {}
-        for raw_group, values in groups.items():
-            group = raw_group if isinstance(raw_group, PrizeGroup) else PrizeGroup(raw_group)
-            if group in normalized:
-                raise ValueError(f'duplicate group: {group.value}')
-            normalized[group] = values
-
-        prizes: list[Prize] = []
-        for group, spec in PRIZE_SPECS.items():
-            values = normalized.get(group, ())
-            if len(values) != spec.count:
-                raise ValueError(f'{group.value} expected {spec.count} values, got {len(values)}')
-
-            for order, raw_value in enumerate(values, start=1):
-                text = str(raw_value).strip()
-                if isinstance(raw_value, bool) or not text.isascii() or not text.isdigit():
-                    raise ValueError(f'{group.value} value must contain only ASCII digits')
-                if isinstance(raw_value, str) and len(text) != spec.width:
-                    raise ValueError(f'{group.value} value must contain exactly {spec.width} digits')
-                if len(text) > spec.width:
-                    raise ValueError(f'{group.value} value must contain exactly {spec.width} digits')
-                prizes.append(
-                    Prize(
-                        prize_group=group,
-                        prize_order=order,
-                        prize_width=spec.width,
-                        full_number=int(text),
-                    )
-                )
-
-        return cls(draw_date=draw_date, source_url=source_url, prizes=tuple(prizes))
+        prizes = prizes_from_groups(groups, group_enum=PrizeGroup, specs=PRIZE_SPECS, prize_class=Prize)
+        return cls(draw_date=draw_date, source_url=source_url, prizes=prizes)
 
     def prizes_for(self, group: PrizeGroup) -> tuple[Prize, ...]:
         return tuple(prize for prize in self.prizes if prize.prize_group is group)

@@ -103,25 +103,21 @@ def loto_daily_frame(draw_results: pd.DataFrame, run_id: str | None = None) -> p
     dataframe['frequency'] = dataframe['frequency'].astype('int64')
     dataframe['appeared'] = dataframe['frequency'].gt(0)
 
-    draws_since: list[int | None] = [None] * len(dataframe)
-    calendar_days_since: list[int | None] = [None] * len(dataframe)
-    appearance_status = ['never_seen'] * len(dataframe)
-    for _, indices in dataframe.groupby('number_2d', sort=False).groups.items():
-        previous_draw_position: int | None = None
-        previous_date: pd.Timestamp | None = None
-        for draw_position, row_index in enumerate(indices):
-            current_date = pd.Timestamp(dataframe.at[row_index, 'draw_date'])
-            if previous_draw_position is not None and previous_date is not None:
-                draws_since[row_index] = draw_position - previous_draw_position
-                calendar_days_since[row_index] = (current_date - previous_date).days
-                appearance_status[row_index] = 'seen_before'
-            if bool(dataframe.at[row_index, 'appeared']):
-                previous_draw_position = draw_position
-                previous_date = current_date
-
-    dataframe['draws_since_previous'] = pd.array(draws_since, dtype='Int64')
-    dataframe['calendar_days_since_previous'] = pd.array(calendar_days_since, dtype='Int64')
-    dataframe['previous_appearance_status'] = pd.array(appearance_status, dtype='string')
+    number_key = dataframe['number_2d']
+    draw_position = dataframe.groupby('number_2d', sort=False).cumcount()
+    # Shift then forward-fill within each number so every row references the latest
+    # appearance strictly before it, including rows where the number appears again.
+    appeared_position = draw_position.where(dataframe['appeared'])
+    appeared_date = dataframe['draw_date'].where(dataframe['appeared'])
+    previous_position = (
+        appeared_position.groupby(number_key, sort=False).shift(1).groupby(number_key, sort=False).ffill()
+    )
+    previous_date = appeared_date.groupby(number_key, sort=False).shift(1).groupby(number_key, sort=False).ffill()
+    dataframe['draws_since_previous'] = (draw_position - previous_position).astype('Int64')
+    dataframe['calendar_days_since_previous'] = (dataframe['draw_date'] - previous_date).dt.days.astype('Int64')
+    dataframe['previous_appearance_status'] = (
+        previous_position.notna().map({True: 'seen_before', False: 'never_seen'}).astype('string')
+    )
     for window in (7, 30, 90):
         dataframe[f'rolling_{window}_frequency'] = (
             dataframe.groupby('number_2d', sort=False)['frequency']

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -20,6 +21,8 @@ from xsmb_etl.extract import (
 )
 from xsmb_etl.xsmn_models import SouthernDailyResult, SouthernPrizeGroup, SouthernStationResult
 
+
+logger = logging.getLogger(__name__)
 
 XSMN_SECTION_ID_PATTERN = re.compile(r'^mn_kqngay_(\d{8})(?:_kq)?$')
 XSMN_CANONICAL_DATE_PATTERN = re.compile(r'/xsmn-(\d{2})-(\d{2})-(\d{4})\.html')
@@ -115,6 +118,7 @@ class SouthernResultExtractor(ResultExtractor):
                 source_url=url,
                 profile=self.source_profile,
             )
+            logger.info('extracted %s result for %s', self.source_profile.region_label, selected_date)
             return SouthernExtractedResult(raw_response=raw_response, result=result)
         except RecoverableHistoricalResultError:
             fallback_url = self.build_fallback_source_url(selected_date)
@@ -134,6 +138,11 @@ class SouthernResultExtractor(ResultExtractor):
                 selected_date=selected_date,
                 source_url=url,
                 profile=self.source_profile,
+            )
+            logger.info(
+                'extracted %s result for %s after fallback reconciliation',
+                self.source_profile.region_label,
+                selected_date,
             )
             return SouthernExtractedResult(
                 raw_response=raw_response,

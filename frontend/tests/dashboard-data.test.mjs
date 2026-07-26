@@ -30,20 +30,24 @@ const explorerQuery = {
   from: "2026-01-01",
   to: null,
   number: explorerSample.numbers[0],
+  value: null,
+  match: null,
+  prizeGroup: null,
 };
 
-function resultPage(query = explorerQuery) {
-  const item = fallbackPayload.draws
+function resultPage(query = explorerQuery, selectedItem = null) {
+  const item = selectedItem ?? fallbackPayload.draws
     .filter((draw) => draw.stationCode === query.station)
     .at(-1);
+  const { region, ...responseQuery } = query;
   return {
     schemaVersion: 2,
     source: "r2",
-    region: query.region,
+    region,
     releaseId: fallbackPayload.manifest.datasetVersion,
     datasetVersion: fallbackPayload.manifest.datasetVersion,
     generatedAt: fallbackPayload.generatedAt,
-    query,
+    query: responseQuery,
     page: { limit: 25, returned: item ? 1 : 0, nextCursor: "next-cursor" },
     items: item ? [item] : [],
   };
@@ -73,10 +77,114 @@ test("Explorer client snapshots filters, cursor, and validates the matching resp
   assert.equal(page.items.length, 1);
 });
 
+test("Explorer client skips empty capped pages until results appear or the range is exhausted", async () => {
+  const calls = [];
+  const emptyPage = {
+    ...resultPage(),
+    page: { limit: 25, returned: 0, nextCursor: "cursor-2" },
+    items: [],
+  };
+  const finalPage = {
+    ...resultPage(),
+    page: { limit: 25, returned: 1, nextCursor: null },
+  };
+  const page = await fetchExplorerPage(
+    explorerQuery,
+    fallbackPayload.manifest.datasetVersion,
+    {
+      cursor: "cursor-1",
+      fetcher: async (input) => {
+        calls.push(String(input));
+        return jsonResponse(calls.length === 1 ? emptyPage : finalPage);
+      },
+    },
+  );
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls[0].includes("cursor=cursor-1"));
+  assert.ok(calls[1].includes("cursor=cursor-2"));
+  assert.equal(page.items.length, 1);
+  assert.equal(page.page.nextCursor, null);
+});
+
+test("Explorer client tolerates a cached pre-full-prize response for legacy filters", async () => {
+  const legacyPage = resultPage();
+  delete legacyPage.query.value;
+  delete legacyPage.query.match;
+  delete legacyPage.query.prizeGroup;
+  const page = await fetchExplorerPage(
+    explorerQuery,
+    fallbackPayload.manifest.datasetVersion,
+    { fetcher: async () => jsonResponse(legacyPage) },
+  );
+
+  assert.deepEqual(page.query, {
+    station: explorerQuery.station,
+    from: explorerQuery.from,
+    to: explorerQuery.to,
+    number: explorerQuery.number,
+    value: null,
+    match: null,
+    prizeGroup: null,
+  });
+});
+
+test("Explorer client sends and snapshots exact full-prize filters", async () => {
+  const item = fallbackPayload.draws.find((draw) => draw.prizes.prize4.includes("0844"));
+  assert.ok(item);
+  const query = {
+    region: "xsmb",
+    station: "xsmb",
+    from: item.date,
+    to: item.date,
+    number: null,
+    value: "0844",
+    match: "exact",
+    prizeGroup: "prize4",
+  };
+  const calls = [];
+  const page = await fetchExplorerPage(query, fallbackPayload.manifest.datasetVersion, {
+    fetcher: async (input) => {
+      calls.push(String(input));
+      return jsonResponse(resultPage(query, item));
+    },
+  });
+
+  assert.deepEqual(calls, [
+    `/api/v2/results?region=xsmb&station=xsmb&limit=25&from=${item.date}&to=${item.date}` +
+      "&value=0844&match=exact&prizeGroup=prize4",
+  ]);
+  assert.deepEqual(page.query, {
+    station: "xsmb",
+    from: item.date,
+    to: item.date,
+    number: null,
+    value: "0844",
+    match: "exact",
+    prizeGroup: "prize4",
+  });
+});
+
 test("Explorer client rejects a valid page belonging to another query", async () => {
   await assert.rejects(
     fetchExplorerPage(explorerQuery, fallbackPayload.manifest.datasetVersion, {
       fetcher: async () => jsonResponse(resultPage({ ...explorerQuery, from: null })),
+    }),
+    (error) => error instanceof ExplorerPageError && error.code === "response_query_mismatch",
+  );
+});
+
+test("Explorer client rejects a page whose full-prize filter snapshot differs", async () => {
+  const query = {
+    ...explorerQuery,
+    number: null,
+    value: explorerSample.specialPrize,
+    match: "exact",
+    prizeGroup: "special",
+  };
+  await assert.rejects(
+    fetchExplorerPage(query, fallbackPayload.manifest.datasetVersion, {
+      fetcher: async () => jsonResponse(resultPage({ ...query, match: "suffix" }, explorerSample)),
     }),
     (error) => error instanceof ExplorerPageError && error.code === "response_query_mismatch",
   );
@@ -104,6 +212,33 @@ test("compatibility Explorer stays bounded and applies the same query snapshot",
   assert.equal(items.length, 25);
   assert.ok(items.every((item) => item.stationCode === explorerQuery.station));
   assert.ok(items.every((item, index) => index === 0 || items[index - 1].date > item.date));
+});
+
+test("compatibility Explorer applies strict full-prize leading-zero semantics", () => {
+  const item = fallbackPayload.draws.find((draw) => draw.prizes.prize4.includes("0844"));
+  assert.ok(item);
+  const base = {
+    region: "xsmb",
+    station: "xsmb",
+    from: item.date,
+    to: item.date,
+    number: null,
+    prizeGroup: "prize4",
+  };
+  assert.deepEqual(
+    compatibilityExplorerItems(fallbackPayload, { ...base, value: "0844", match: "exact" })
+      .map((draw) => draw.date),
+    [item.date],
+  );
+  assert.deepEqual(
+    compatibilityExplorerItems(fallbackPayload, { ...base, value: "844", match: "exact" }),
+    [],
+  );
+  assert.deepEqual(
+    compatibilityExplorerItems(fallbackPayload, { ...base, value: "844", match: "suffix" })
+      .map((draw) => draw.date),
+    [item.date],
+  );
 });
 
 test("preferred dashboard degrades to v1 when v2 returns malformed metadata", async () => {

@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import {
   ANALYTICS_MODEL_VERSION,
   BASELINE_COVERAGE,
@@ -34,18 +41,32 @@ import {
   completeExplorerRequest,
   explorerQueryError,
   failExplorerRequest,
+  normalizeExplorerQuery,
   type ExplorerQuery,
 } from "@/explorer-state";
+import { heatCellColors } from "@/heat-color";
 import {
   fetchLotteryOperations,
   type LotteryOperationsSnapshot,
 } from "@/ops-data";
 import {
+  PRIZE_ANALYTICS_VERSION,
+  PrizeAnalyticsError,
+  analyzePrizeWindow,
+  type PrizeWindowAnalysis,
+} from "@/prize-analytics";
+import {
+  LOTTERY_PRIZE_GROUPS,
   LOTTERY_REGIONS,
+  isLotteryPrizeGroup,
+  isLotteryPrizeMatch,
   isLotteryRegion,
+  lotteryPrizeGroupSupported,
   regionName,
   type LotteryDashboardData,
   type LotteryDraw,
+  type LotteryPrizeGroup,
+  type LotteryPrizeMatch,
   type LotteryRegion,
 } from "@/lottery-contract";
 
@@ -68,6 +89,15 @@ const percentFormatter = new Intl.NumberFormat("vi-VN", {
 
 const PRIZE_NAMES: Record<string, string> = {
   special: "Đặc biệt",
+  prize1: "Giải nhất",
+  prize2: "Giải nhì",
+  prize3: "Giải ba",
+  prize4: "Giải tư",
+  prize5: "Giải năm",
+  prize6: "Giải sáu",
+  prize7: "Giải bảy",
+  prize8: "Giải tám",
+  // Preserve compatibility with older serving payloads.
   first: "Giải nhất",
   second: "Giải nhì",
   third: "Giải ba",
@@ -78,23 +108,31 @@ const PRIZE_NAMES: Record<string, string> = {
   eighth: "Giải tám",
 };
 
+const dateFormatter = new Intl.DateTimeFormat("vi-VN", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+});
+const timestampFormatter = new Intl.DateTimeFormat("vi-VN", {
+  day: "2-digit",
+  month: "2-digit",
+  year: "numeric",
+  hour: "2-digit",
+  minute: "2-digit",
+});
+const runTimeFormatter = new Intl.DateTimeFormat("vi-VN", {
+  hour: "2-digit",
+  minute: "2-digit",
+  second: "2-digit",
+});
+
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat("vi-VN", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-  }).format(new Date(`${value}T00:00:00+07:00`));
+  return dateFormatter.format(new Date(`${value}T00:00:00+07:00`));
 }
 
 function formatTimestamp(value: string | null | undefined) {
   if (!value) return "Chưa có bằng chứng chạy";
-  return new Intl.DateTimeFormat("vi-VN", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date(value));
+  return timestampFormatter.format(new Date(value));
 }
 
 function DashboardLoading() {
@@ -108,6 +146,65 @@ function DashboardLoading() {
 
 function initialSearchParameter(name: string): string {
   return typeof window === "undefined" ? "" : new URLSearchParams(window.location.search).get(name) ?? "";
+}
+
+function initialExplorerDeepLinkError(region: LotteryRegion): string {
+  const number = initialSearchParameter("number");
+  const value = initialSearchParameter("value");
+  const match = initialSearchParameter("match");
+  const prizeGroup = initialSearchParameter("prizeGroup");
+  if (number && !/^[0-9]{2}$/.test(number)) {
+    return "Deep link number phải gồm đúng hai chữ số.";
+  }
+  if (number && (value || match || prizeGroup)) {
+    return "Deep link không thể trộn number với bộ lọc giải đầy đủ.";
+  }
+  if (match && !isLotteryPrizeMatch(match)) {
+    return "Deep link có kiểu so khớp không hợp lệ.";
+  }
+  if (prizeGroup &&
+    (!isLotteryPrizeGroup(prizeGroup) || !lotteryPrizeGroupSupported(region, prizeGroup))) {
+    return "Deep link có nhóm giải không hợp lệ cho miền đã chọn.";
+  }
+  if (!value && (match || prizeGroup)) {
+    return "Deep link phải có value khi dùng match hoặc prizeGroup.";
+  }
+  return "";
+}
+
+function downloadJson(filename: string, payload: unknown) {
+  const url = URL.createObjectURL(
+    new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: "application/json" }),
+  );
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.hidden = true;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function prizeMatchesExplorerQuery(
+  prize: string,
+  group: string,
+  query: ExplorerQuery | null,
+): boolean {
+  if (query === null) return false;
+  const normalized = normalizeExplorerQuery(query);
+  if (normalized.number !== null) return prize.endsWith(normalized.number);
+  if (normalized.value === null) return false;
+  if (normalized.prizeGroup !== null && normalized.prizeGroup !== group) return false;
+  return normalized.match === "suffix"
+    ? prize.endsWith(normalized.value)
+    : prize === normalized.value;
+}
+
+function orderedPrizeEntries(prizes: Record<string, string[]>): Array<[LotteryPrizeGroup, string[]]> {
+  return LOTTERY_PRIZE_GROUPS.flatMap((group) =>
+    Object.hasOwn(prizes, group) ? [[group, prizes[group]] as [LotteryPrizeGroup, string[]]] : []
+  );
 }
 
 export default function Home() {
@@ -127,12 +224,27 @@ export default function Home() {
   const [selectedWindow, setSelectedWindow] = useState(90);
   const [activeWindow, setActiveWindow] = useState(90);
   const [lastRun, setLastRun] = useState("Chưa chạy");
+  const [latestResultView, setLatestResultView] = useState<"tails" | "full">("tails");
   const [reloadToken, setReloadToken] = useState(0);
   const [operations, setOperations] = useState<LotteryOperationsSnapshot | null>(null);
   const [operationsError, setOperationsError] = useState("");
   const [explorerFrom, setExplorerFrom] = useState(() => initialSearchParameter("from"));
   const [explorerTo, setExplorerTo] = useState(() => initialSearchParameter("to"));
-  const [explorerNumber, setExplorerNumber] = useState(() => initialSearchParameter("number"));
+  const [explorerValue, setExplorerValue] = useState(
+    () => initialSearchParameter("value") || initialSearchParameter("number"),
+  );
+  const [explorerMatch, setExplorerMatch] = useState<LotteryPrizeMatch>(() => {
+    const value = initialSearchParameter("match");
+    if (isLotteryPrizeMatch(value)) return value;
+    return initialSearchParameter("value") ? "exact" : "suffix";
+  });
+  const [explorerPrizeGroup, setExplorerPrizeGroup] = useState<LotteryPrizeGroup | "">(() => {
+    const value = initialSearchParameter("prizeGroup");
+    return isLotteryPrizeGroup(value) && lotteryPrizeGroupSupported(region, value) ? value : "";
+  });
+  const [explorerDeepLinkError, setExplorerDeepLinkError] = useState(
+    () => initialExplorerDeepLinkError(region),
+  );
   const [explorerState, setExplorerState] = useState(INITIAL_EXPLORER_STATE);
   const explorerAbortController = useRef<AbortController | null>(null);
   const explorerDeepLinkPending = useRef(
@@ -219,9 +331,12 @@ export default function Home() {
     const applied = explorerState.appliedQuery;
     if (applied !== null && applied.region === region && applied.station === selectedStation &&
       explorerQueryError(applied) === null) {
-      if (applied.from !== null) parameters.set("from", applied.from);
-      if (applied.to !== null) parameters.set("to", applied.to);
-      if (applied.number !== null) parameters.set("number", applied.number);
+      const normalized = normalizeExplorerQuery(applied);
+      if (normalized.from !== null) parameters.set("from", normalized.from);
+      if (normalized.to !== null) parameters.set("to", normalized.to);
+      if (normalized.value !== null) parameters.set("value", normalized.value);
+      if (normalized.match !== null) parameters.set("match", normalized.match);
+      if (normalized.prizeGroup !== null) parameters.set("prizeGroup", normalized.prizeGroup);
     }
     window.history.replaceState(null, "", `${window.location.pathname}?${parameters}${window.location.hash}`);
   }, [explorerState.appliedQuery, region, selectedStation]);
@@ -257,7 +372,9 @@ export default function Home() {
         description: "Kết hợp 60% tần suất và 40% khoảng vắng trên cùng cửa sổ dữ liệu.",
       },
     ];
-    const models: ModelResult[] = modelDefinitions.map((model) => {
+    // backtest throws unless it has a full training window plus at least one evaluation draw.
+    const benchmarkAvailable = draws.length > activeWindow;
+    const models: ModelResult[] = !benchmarkAvailable ? [] : modelDefinitions.map((model) => {
       const benchmark = backtest(draws, {
         datasetVersion: data.manifest.datasetVersion,
         region,
@@ -284,10 +401,21 @@ export default function Home() {
       .sort((left, right) => right.score - left.score || left.number.localeCompare(right.number))
       .slice(0, 5);
 
+    let prizeLab: PrizeWindowAnalysis | null;
+    try {
+      prizeLab = analyzePrizeWindow(analysisDraws);
+    } catch (reason: unknown) {
+      if (!(reason instanceof PrizeAnalyticsError)) throw reason;
+      prizeLab = null;
+    }
+
     return {
       analysisDraws,
       filteredDraws: draws,
       station,
+      benchmarkAvailable,
+      requiredDraws: activeWindow + 1,
+      availableDraws: draws.length,
       evaluationCount: models[0]?.benchmark.evaluationCount ?? 0,
       counts,
       drawGaps,
@@ -298,25 +426,33 @@ export default function Home() {
         .slice(0, 5),
       momentum,
       models,
+      prizeLab,
     };
   }, [activeWindow, data, draws, region, selectedStation]);
 
   const resetExplorer = useCallback(() => {
     explorerAbortController.current?.abort();
     explorerAbortController.current = null;
+    setExplorerDeepLinkError("");
     setExplorerState(INITIAL_EXPLORER_STATE);
   }, []);
 
-  const runExplorer = useCallback(async (append = false) => {
+  const runExplorer = useCallback(async (
+    append = false,
+    overrideQuery: ExplorerQuery | null = null,
+  ) => {
     if (!data || !selectedStation) return;
     const query: ExplorerQuery | null = append
       ? explorerState.appliedQuery
-      : {
+      : overrideQuery ?? {
           region,
           station: selectedStation,
           from: explorerFrom || null,
           to: explorerTo || null,
-          number: explorerNumber || null,
+          number: null,
+          value: explorerValue || null,
+          match: explorerValue ? explorerMatch : null,
+          prizeGroup: explorerValue && explorerPrizeGroup ? explorerPrizeGroup : null,
         };
     const cursor = append ? explorerState.cursor : null;
     if (query === null || (append && cursor === null)) return;
@@ -367,10 +503,12 @@ export default function Home() {
   }, [
     data,
     explorerFrom,
-    explorerNumber,
+    explorerMatch,
+    explorerPrizeGroup,
     explorerState.appliedQuery,
     explorerState.cursor,
     explorerTo,
+    explorerValue,
     fallbackData,
     region,
     selectedStation,
@@ -378,10 +516,12 @@ export default function Home() {
   ]);
 
   useEffect(() => {
-    if (!data || !selectedStation || !explorerDeepLinkPending.current) return;
+    if (!data || !selectedStation || draws.length === 0 || !explorerDeepLinkPending.current) return;
     explorerDeepLinkPending.current = false;
-    void runExplorer();
-  }, [data, runExplorer, selectedStation]);
+    if (explorerDeepLinkError) return;
+    const timeoutId = window.setTimeout(() => void runExplorer(), 0);
+    return () => window.clearTimeout(timeoutId);
+  }, [data, draws.length, explorerDeepLinkError, runExplorer, selectedStation]);
 
   if (error) {
     return (
@@ -405,6 +545,44 @@ export default function Home() {
 
   const latestDraw = analysis.filteredDraws.at(-1);
   if (!latestDraw) return <DashboardLoading />;
+  const explorerPrizeGroups = LOTTERY_PRIZE_GROUPS.filter((group) =>
+    lotteryPrizeGroupSupported(region, group)
+  );
+  const appliedExplorerQuery = explorerState.appliedQuery === null
+    ? null
+    : normalizeExplorerQuery(explorerState.appliedQuery);
+  const prizeLab = analysis.prizeLab;
+  const topSpecialTails = prizeLab === null
+    ? []
+    : [...prizeLab.specialPrize.tail3Frequency]
+      .filter((item) => item.count > 1)
+      .sort((left, right) => right.count - left.count || left.tail3.localeCompare(right.tail3))
+      .slice(0, 8);
+  const topSpecialHeads = prizeLab === null
+    ? []
+    : [...prizeLab.specialPrize.head3Frequency]
+      .filter((item) => item.count > 1)
+      .sort((left, right) => right.count - left.count || left.head3.localeCompare(right.head3))
+      .slice(0, 8);
+  const specialTailRecency = new Map<string, number>(
+    prizeLab === null
+      ? []
+      : prizeLab.specialPrize.tail3Recency.map((item) => [item.tail3, item.drawsSinceLastSeen]),
+  );
+  const topSpecialDigitSums = prizeLab === null
+    ? []
+    : [...prizeLab.specialPrize.digitSumDistribution]
+      .sort((left, right) => right.count - left.count || left.digitSum - right.digitSum)
+      .slice(0, 6);
+  const specialPositionLeaders = prizeLab === null
+    ? []
+    : prizeLab.specialPrize.positionalDigitDistributions.map((distribution) => {
+      const maximum = Math.max(...distribution.digits.map((candidate) => candidate.count));
+      return {
+        position: distribution.positionFromLeft,
+        leaders: distribution.digits.filter((candidate) => candidate.count === maximum),
+      };
+    });
 
   const regionalHealth = operations?.health.regions[region] ?? null;
   const unhealthyRegions = operations
@@ -433,14 +611,11 @@ export default function Home() {
 
   const runModels = () => {
     setActiveWindow(selectedWindow);
-    setLastRun(
-      new Intl.DateTimeFormat("vi-VN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(
-        new Date(),
-      ),
-    );
+    setLastRun(runTimeFormatter.format(new Date()));
   };
 
   const downloadBenchmarkReport = () => {
+    if (!analysis.benchmarkAvailable) return;
     const report = buildBenchmarkReport({
       datasetVersion: data.manifest.datasetVersion,
       region,
@@ -451,17 +626,29 @@ export default function Home() {
       windows: WINDOW_OPTIONS,
       benchmarks: analysis.models.map((model) => model.benchmark),
     });
-    const url = URL.createObjectURL(
-      new Blob([`${JSON.stringify(report, null, 2)}\n`], { type: "application/json" }),
+    downloadJson(benchmarkReportFilename(report), report);
+  };
+
+  const downloadPrizeLabReport = () => {
+    if (prizeLab === null) return;
+    downloadJson(
+      `prize-lab-${region}-${analysis.station.code}-${prizeLab.dateRange.to}.json`,
+      {
+        schemaVersion: 1,
+        reportType: "prize-lab",
+        analyticsVersion: PRIZE_ANALYTICS_VERSION,
+        reportGeneratedAt: new Date().toISOString(),
+        datasetGeneratedAt: data.generatedAt,
+        datasetVersion: data.manifest.datasetVersion,
+        region,
+        stationCode: analysis.station.code,
+        stationName: analysis.station.name,
+        requestedWindow: activeWindow,
+        observedDrawCount: prizeLab.drawCount,
+        disclosure: "Thống kê mô tả dữ liệu lịch sử; không dự báo xác suất trúng.",
+        analysis: prizeLab,
+      },
     );
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = benchmarkReportFilename(report);
-    anchor.hidden = true;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    window.setTimeout(() => URL.revokeObjectURL(url), 0);
   };
 
   const chooseRegion = (nextRegion: LotteryRegion) => {
@@ -470,7 +657,9 @@ export default function Home() {
     requestedStation.current = "";
     setExplorerFrom("");
     setExplorerTo("");
-    setExplorerNumber("");
+    setExplorerValue("");
+    setExplorerMatch("suffix");
+    setExplorerPrizeGroup("");
     setSelectedStation("");
     setData(null);
     setFallbackData(null);
@@ -488,6 +677,33 @@ export default function Home() {
     setHistoryError("");
   };
 
+  const openExplorerEvidence = (
+    value: string,
+    match: LotteryPrizeMatch = "suffix",
+    prizeGroup: LotteryPrizeGroup | "" = "",
+  ) => {
+    const query: ExplorerQuery = {
+      region,
+      station: selectedStation,
+      from: prizeLab?.dateRange.from ?? analysis.analysisDraws[0].date,
+      to: prizeLab?.dateRange.to ?? analysis.analysisDraws[analysis.analysisDraws.length - 1].date,
+      number: null,
+      value,
+      match,
+      prizeGroup: prizeGroup || null,
+    };
+    resetExplorer();
+    setExplorerFrom(query.from ?? "");
+    setExplorerTo(query.to ?? "");
+    setExplorerValue(value);
+    setExplorerMatch(match);
+    setExplorerPrizeGroup(prizeGroup);
+    window.requestAnimationFrame(() => {
+      document.getElementById("explorer")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    void runExplorer(false, query);
+  };
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -503,6 +719,7 @@ export default function Home() {
           <a href="#explorer">Tra cứu</a>
           <a href="#models">Mô hình</a>
           <a href="#heatmap">Heatmap</a>
+          <a href="#prize-lab">Prize Lab</a>
           <a href="#health">Dữ liệu</a>
         </nav>
         <div className="live-badge"><span /> {dataSource === "r2" ? "R2 live" : "Demo local"}</div>
@@ -538,17 +755,67 @@ export default function Home() {
             <span>Kết quả gần nhất</span>
             <strong>{formatDate(latestDraw.date)}</strong>
           </div>
-          <div className="special-result">
-            <small>Đuôi giải đặc biệt</small>
-            <strong>{latestDraw.specialTail}</strong>
+          <div className="latest-view-toggle" role="group" aria-label="Chế độ hiển thị kết quả gần nhất">
+            <button
+              type="button"
+              aria-controls="latest-result-panel"
+              aria-pressed={latestResultView === "tails"}
+              onClick={() => setLatestResultView("tails")}
+            >
+              Lô tô 2 số
+            </button>
+            <button
+              type="button"
+              aria-controls="latest-result-panel"
+              aria-pressed={latestResultView === "full"}
+              onClick={() => setLatestResultView("full")}
+            >
+              Kết quả đầy đủ
+            </button>
           </div>
           <div className="latest-station">{latestDraw.stationName}</div>
-          <div className="latest-grid" aria-label={`${latestDraw.numbers.length} kết quả loto gần nhất`}>
-            {latestDraw.numbers.map((number, index) => (
-              <span className={index === 0 ? "is-special" : ""} key={`${number}-${index}`}>{number}</span>
-            ))}
+          <div className="latest-result-body" id="latest-result-panel">
+            {latestResultView === "tails" ? (
+              <>
+                <div className="special-result">
+                  <small>Đuôi giải đặc biệt</small>
+                  <strong>{latestDraw.specialTail}</strong>
+                </div>
+                <div className="latest-grid" aria-label={`${latestDraw.numbers.length} kết quả loto gần nhất`}>
+                  {latestDraw.numbers.map((number, index) => (
+                    <span className={index === 0 ? "is-special" : ""} key={`${number}-${index}`}>
+                      {number}
+                    </span>
+                  ))}
+                </div>
+                <p>{latestDraw.numbers.length} kết quả · giữ nguyên số 0 ở đầu</p>
+              </>
+            ) : (
+              <>
+                <div
+                  className="latest-prize-table"
+                  role="table"
+                  aria-label={`Kết quả đầy đủ ${latestDraw.stationName} ngày ${formatDate(latestDraw.date)}`}
+                >
+                  {orderedPrizeEntries(latestDraw.prizes).map(([group, prizes]) => (
+                    <div
+                      className={group === "special" ? "latest-prize-row special" : "latest-prize-row"}
+                      role="row"
+                      key={group}
+                    >
+                      <span role="rowheader">{PRIZE_NAMES[group] ?? group}</span>
+                      <div role="cell">
+                        {prizes.map((prize, index) => (
+                          <strong key={`${prize}-${index}`}>{prize}</strong>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p>Số giải đầy đủ · giữ nguyên số 0 ở đầu</p>
+              </>
+            )}
           </div>
-          <p>{latestDraw.numbers.length} kết quả · giữ nguyên số 0 ở đầu</p>
         </div>
       </section>
 
@@ -562,7 +829,9 @@ export default function Home() {
       <section className="result-explorer" id="explorer">
         <div className="section-heading">
           <div><p className="kicker">RESULT EXPLORER</p><h2>Tra cứu từng kỳ quay</h2></div>
-          <p>Lọc đúng đài, ngày và đuôi 00–99. Kết quả giữ nguyên từng nhóm giải và mọi số 0 ở đầu.</p>
+          <p>
+            Tìm theo số đầy đủ hoặc đuôi 1–6 chữ số, thu hẹp đúng nhóm giải và giữ nguyên mọi số 0 ở đầu.
+          </p>
         </div>
         <form
           className="explorer-controls"
@@ -602,28 +871,58 @@ export default function Home() {
             />
           </label>
           <label>
-            Đuôi loto
+            Cách khớp
+            <select
+              value={explorerMatch}
+              onChange={(event) => {
+                resetExplorer();
+                setExplorerMatch(event.target.value as LotteryPrizeMatch);
+              }}
+            >
+              <option value="suffix">Khớp đuôi</option>
+              <option value="exact">Số đầy đủ</option>
+            </select>
+          </label>
+          <label>
+            {explorerMatch === "suffix" ? "Đuôi cần tìm" : "Số cần tìm"}
             <input
               type="text"
               inputMode="numeric"
-              pattern="[0-9]{2}"
-              maxLength={2}
-              placeholder="00–99"
-              value={explorerNumber}
+              pattern="[0-9]{1,6}"
+              maxLength={6}
+              placeholder={explorerMatch === "suffix" ? "VD: 13 hoặc 113" : "VD: 005113"}
+              value={explorerValue}
               onChange={(event) => {
                 resetExplorer();
-                setExplorerNumber(event.target.value.replace(/\D/g, "").slice(0, 2));
+                setExplorerValue(event.target.value.replace(/\D/g, "").slice(0, 6));
               }}
             />
+          </label>
+          <label>
+            Nhóm giải
+            <select
+              value={explorerPrizeGroup}
+              onChange={(event) => {
+                resetExplorer();
+                setExplorerPrizeGroup(event.target.value as LotteryPrizeGroup | "");
+              }}
+            >
+              <option value="">Tất cả giải</option>
+              {explorerPrizeGroups.map((group) => (
+                <option key={group} value={group}>{PRIZE_NAMES[group] ?? group}</option>
+              ))}
+            </select>
           </label>
           <button type="submit" disabled={explorerState.status === "loading"}>
             {explorerState.status === "loading" && !explorerState.appending ? "Đang tra…" : "Tra kết quả"}
           </button>
         </form>
-        {explorerState.status === "error" && explorerState.error && (
-          <p className="explorer-message error" role="alert">{explorerState.error}</p>
+        {(explorerDeepLinkError || (explorerState.status === "error" && explorerState.error)) && (
+          <p className="explorer-message error" role="alert">
+            {explorerDeepLinkError || explorerState.error}
+          </p>
         )}
-        {explorerState.status === "idle" && (
+        {explorerState.status === "idle" && !explorerDeepLinkError && (
           <p className="explorer-message">Chọn bộ lọc rồi bấm “Tra kết quả”. Đặt hai ngày giống nhau để tra đúng một kỳ.</p>
         )}
         {explorerState.status === "loading" && explorerState.items.length === 0 && (
@@ -644,22 +943,31 @@ export default function Home() {
                 <div className="result-special"><small>Đặc biệt</small><strong>{draw.specialPrize}</strong></div>
               </header>
               <div className="prize-table">
-                {Object.entries(draw.prizes).map(([group, prizes]) => (
-                  <div className={group === "special" ? "prize-row special" : "prize-row"} key={group}>
-                    <span>{PRIZE_NAMES[group] ?? group}</span>
-                    <div>
-                      {prizes.map((prize, index) => (
-                        <strong
-                          className={explorerState.appliedQuery?.number &&
-                            prize.endsWith(explorerState.appliedQuery.number) ? "matched" : ""}
-                          key={`${prize}-${index}`}
-                        >
-                          {prize}
-                        </strong>
-                      ))}
+                {orderedPrizeEntries(draw.prizes)
+                  .filter(([group]) =>
+                    appliedExplorerQuery?.prizeGroup === null ||
+                    appliedExplorerQuery?.prizeGroup === undefined ||
+                    appliedExplorerQuery.prizeGroup === group
+                  )
+                  .map(([group, prizes]) => (
+                    <div className={group === "special" ? "prize-row special" : "prize-row"} key={group}>
+                      <span>{PRIZE_NAMES[group] ?? group}</span>
+                      <div>
+                        {prizes.map((prize, index) => (
+                          <strong
+                            className={prizeMatchesExplorerQuery(
+                              prize,
+                              group,
+                              explorerState.appliedQuery,
+                            ) ? "matched" : ""}
+                            key={`${prize}-${index}`}
+                          >
+                            {prize}
+                          </strong>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
               </div>
             </article>
           ))}
@@ -716,49 +1024,67 @@ export default function Home() {
           <small>Lần chạy: {lastRun}</small>
         </div>
 
-        <div className="model-grid">
-          {analysis.models.map((model, index) => (
-            <article className="model-card" key={model.kind}>
-              <div className="model-index">0{index + 1}</div>
-              <p className="model-eyebrow">{model.eyebrow}</p>
-              <h3>{model.name}</h3>
-              <p className="model-description">{model.description}</p>
-              <div className="pick-list" aria-label={`Top 10 ${model.name}`}>
-                {model.picks.map((number, pickIndex) => (
-                  <span key={number} className={pickIndex < 3 ? "top-pick" : ""}>{number}</span>
-                ))}
-              </div>
-              <div className="model-stats">
-                <div>
-                  <small>Coverage</small>
-                  <strong>{percentFormatter.format(model.benchmark.coverage)}</strong>
+        {analysis.benchmarkAvailable ? (
+          <div className="model-grid">
+            {analysis.models.map((model, index) => (
+              <article className="model-card" key={model.kind}>
+                <div className="model-index">0{index + 1}</div>
+                <p className="model-eyebrow">{model.eyebrow}</p>
+                <h3>{model.name}</h3>
+                <p className="model-description">{model.description}</p>
+                <div className="pick-list" aria-label={`Top 10 ${model.name}`}>
+                  {model.picks.map((number, pickIndex) => (
+                    <button
+                      type="button"
+                      key={number}
+                      className={pickIndex < 3 ? "top-pick" : ""}
+                      onClick={() => openExplorerEvidence(number)}
+                      aria-label={`Tra các giải có đuôi ${number} trong ${activeWindow} kỳ`}
+                      title={`Mở bằng chứng gốc cho đuôi ${number}`}
+                    >
+                      {number}
+                    </button>
+                  ))}
                 </div>
-                <div>
-                  <small>95% CI</small>
-                  <strong>
-                    {percentFormatter.format(model.benchmark.coverageConfidenceInterval.lower)}
-                    {" — "}
-                    {percentFormatter.format(model.benchmark.coverageConfidenceInterval.upper)}
-                  </strong>
+                <div className="model-stats">
+                  <div>
+                    <small>Coverage</small>
+                    <strong>{percentFormatter.format(model.benchmark.coverage)}</strong>
+                  </div>
+                  <div>
+                    <small>95% CI</small>
+                    <strong>
+                      {percentFormatter.format(model.benchmark.coverageConfidenceInterval.lower)}
+                      {" — "}
+                      {percentFormatter.format(model.benchmark.coverageConfidenceInterval.upper)}
+                    </strong>
+                  </div>
+                  <div>
+                    <small>Hit rate</small>
+                    <strong>{percentFormatter.format(model.benchmark.hitRate)}</strong>
+                  </div>
+                  <div>
+                    <small>Lift / baseline</small>
+                    <strong>{model.benchmark.lift.toFixed(2)}×</strong>
+                  </div>
                 </div>
-                <div>
-                  <small>Hit rate</small>
-                  <strong>{percentFormatter.format(model.benchmark.hitRate)}</strong>
-                </div>
-                <div>
-                  <small>Lift / baseline</small>
-                  <strong>{model.benchmark.lift.toFixed(2)}×</strong>
-                </div>
-              </div>
-              <p className="model-sample">
-                {model.benchmark.evaluationCount} kỳ · {formatDate(model.benchmark.evaluationRange.from)}
-                {" — "}
-                {formatDate(model.benchmark.evaluationRange.to)} · không nhìn trước
-              </p>
-              <code className="model-fingerprint">{model.benchmark.fingerprint}</code>
-            </article>
-          ))}
-        </div>
+                <p className="model-sample">
+                  {model.benchmark.evaluationCount} kỳ · {formatDate(model.benchmark.evaluationRange.from)}
+                  {" — "}
+                  {formatDate(model.benchmark.evaluationRange.to)} · không nhìn trước
+                </p>
+                <code className="model-fingerprint">{model.benchmark.fingerprint}</code>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="model-empty-notice" role="status">
+            Chưa đủ lịch sử để backtest cửa sổ {activeWindow} kỳ: cần ít nhất{" "}
+            {analysis.requiredDraws} kỳ nhưng đài này mới có {analysis.availableDraws} kỳ.
+            Chọn cửa sổ nhỏ hơn rồi bấm “Chạy mô hình”; heatmap, nóng/lạnh và Prize Lab
+            vẫn dùng toàn bộ lịch sử hiện có.
+          </p>
+        )}
         <div className="benchmark-actions">
           <p className="model-warning">
             <strong>{ANALYTICS_MODEL_VERSION}</strong> · baseline {percentFormatter.format(BASELINE_COVERAGE)}.
@@ -766,7 +1092,12 @@ export default function Home() {
             trông tốt hơn thực tế. Đây là heuristic mô tả và backtest, không phải dự báo xác suất trúng
             hay khuyến nghị đặt cược.
           </p>
-          <button className="benchmark-download" type="button" onClick={downloadBenchmarkReport}>
+          <button
+            className="benchmark-download"
+            type="button"
+            onClick={downloadBenchmarkReport}
+            disabled={!analysis.benchmarkAvailable}
+          >
             Tải benchmark JSON
           </button>
         </div>
@@ -782,17 +1113,17 @@ export default function Home() {
             {Array.from({ length: 100 }, (_, index) => String(index).padStart(2, "0")).map((number) => {
               const intensity = analysis.counts[number] / analysis.maxFrequency;
               return (
-                <div
+                <button
+                  type="button"
                   className="heat-cell"
                   key={number}
-                  style={{
-                    backgroundColor: `rgba(224, 58, 36, ${0.12 + intensity * 0.88})`,
-                    color: intensity > 0.55 ? "#fffdf7" : "#171714",
-                  }}
+                  onClick={() => openExplorerEvidence(number)}
+                  style={heatCellColors(intensity)}
                   title={`${number}: ${analysis.counts[number]} lần`}
+                  aria-label={`Tra các giải có đuôi ${number}, xuất hiện ${analysis.counts[number]} lần`}
                 >
                   <strong>{number}</strong><small>{analysis.counts[number]}</small>
-                </div>
+                </button>
               );
             })}
           </div>
@@ -819,6 +1150,224 @@ export default function Home() {
             ))}
           </article>
         </aside>
+      </section>
+
+      <section className="prize-lab" id="prize-lab">
+        <div className="section-heading prize-lab-heading">
+          <div>
+            <p className="kicker">PRIZE LAB · FULL NUMBER</p>
+            <h2>Mổ xẻ từng chữ số</h2>
+          </div>
+          {prizeLab !== null && (
+            <div className="prize-lab-heading-copy">
+              <p>
+                Phân tích riêng từng nhóm giải trong {prizeLab.drawCount} kỳ của{" "}
+                {prizeLab.stationName}; không trộn độ dài và không biến thống kê thành dự báo.
+              </p>
+              <button type="button" onClick={downloadPrizeLabReport}>Tải Prize Lab JSON</button>
+            </div>
+          )}
+        </div>
+
+        {prizeLab === null ? (
+          <p className="prize-lab-empty" role="status">
+            Dữ liệu giải trong cửa sổ này chưa vượt qua kiểm tra nhất quán (thiếu nhóm giải hoặc lệch
+            định dạng) nên Prize Lab tạm ẩn. Các phân tích còn lại vẫn hiển thị từ lịch sử hiện có.
+          </p>
+        ) : (<>
+          <div className="prize-kpis" aria-label="Tổng quan giải đặc biệt">
+            <article>
+              <small>Mẫu giải đặc biệt</small>
+              <strong>{numberFormatter.format(prizeLab.specialPrize.observations)}</strong>
+              <p>{formatDate(prizeLab.dateRange.from)} — {formatDate(prizeLab.dateRange.to)}</p>
+            </article>
+            <article>
+              <small>Giá trị phân biệt</small>
+              <strong>{numberFormatter.format(prizeLab.specialPrize.distinctCount)}</strong>
+              <p>{prizeLab.specialPrize.exactRepeats.length} giá trị có lặp</p>
+            </article>
+            <article>
+              <small>Bắt đầu bằng 0</small>
+              <strong>{percentFormatter.format(prizeLab.specialPrize.leadingZeroRate)}</strong>
+              <p>{prizeLab.specialPrize.leadingZeroCount} / {prizeLab.specialPrize.observations} kỳ</p>
+            </article>
+            <article>
+              <small>Đuôi chẵn / lẻ</small>
+              <strong>
+                {percentFormatter.format(prizeLab.specialPrize.parity.evenRate)}
+                {" / "}
+                {percentFormatter.format(prizeLab.specialPrize.parity.oddRate)}
+              </strong>
+              <p>Đếm theo chữ số cuối</p>
+            </article>
+          </div>
+
+          <div className="prize-lab-layout">
+            <article className="panel prize-anatomy">
+              <div className="panel-heading">
+                <div>
+                  <p className="kicker">SPECIAL PRIZE ANATOMY</p>
+                  <h2>Giải đặc biệt {prizeLab.specialPrize.officialWidth} số</h2>
+                </div>
+                <span>{PRIZE_ANALYTICS_VERSION}</span>
+              </div>
+
+              <h3>Chữ số nổi bật theo từng vị trí</h3>
+              <div
+                className="position-grid"
+                style={{
+                  "--position-columns": prizeLab.specialPrize.officialWidth,
+                } as CSSProperties}
+              >
+                {specialPositionLeaders.map(({ position, leaders }) => (
+                  <div key={position}>
+                    <small>Vị trí {position}</small>
+                    <strong className={leaders.length > 1 ? "has-tie" : undefined}>
+                      {leaders.map((leader) => leader.digit).join(" · ")}
+                    </strong>
+                    <span>
+                      {leaders[0].count} lần · {percentFormatter.format(leaders[0].rate)}
+                      {leaders.length > 1 ? ` · ${leaders.length} số đồng hạng` : ""}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="digit-presence">
+                <h3>Chạm 0–9 trong giải đặc biệt</h3>
+                <div
+                  className="digit-presence-grid"
+                  aria-label="Tỷ lệ kỳ mà giải đặc biệt chứa từng chữ số 0 đến 9"
+                >
+                  {prizeLab.specialPrize.digitPresence.map((item) => (
+                    <div
+                      className="digit-presence-row"
+                      key={item.digit}
+                      title={`Chạm ${item.digit}: ${item.count}/${prizeLab.specialPrize.observations} kỳ`}
+                    >
+                      <strong>{item.digit}</strong>
+                      <div><i style={{ width: `${item.rate * 100}%` }} /></div>
+                      <small>{item.count} kỳ · {percentFormatter.format(item.rate)}</small>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="prize-pattern-columns">
+                <div>
+                  <h3>Đuôi 3 số lặp lại</h3>
+                  {topSpecialTails.length > 0 ? (
+                    <div className="pattern-list">
+                      {topSpecialTails.map((item) => {
+                        const drawsSince = specialTailRecency.get(item.tail3);
+                        return (
+                          <button
+                            type="button"
+                            key={item.tail3}
+                            onClick={() => openExplorerEvidence(item.tail3, "suffix", "special")}
+                            title={`Tra giải đặc biệt có đuôi ${item.tail3}`}
+                          >
+                            <strong>{item.tail3}</strong>
+                            <span>
+                              {item.count} lần · {percentFormatter.format(item.rate)}
+                              {drawsSince !== undefined && (drawsSince === 0
+                                ? " · vừa về kỳ mới nhất"
+                                : ` · về cách đây ${drawsSince} kỳ`)}
+                            </span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <p className="pattern-empty">Chưa có đuôi 3 số nào lặp trong cửa sổ này.</p>
+                  )}
+                </div>
+                <div>
+                  <h3>Đầu 3 số lặp lại</h3>
+                  {topSpecialHeads.length > 0 ? (
+                    <div className="pattern-list">
+                      {topSpecialHeads.map((item) => (
+                        <div key={item.head3}>
+                          <strong>{item.head3}</strong>
+                          <span>{item.count} lần · {percentFormatter.format(item.rate)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="pattern-empty">Chưa có đầu 3 số nào lặp trong cửa sổ này.</p>
+                  )}
+                </div>
+                <div>
+                  <h3>Tổng chữ số phổ biến</h3>
+                  <div className="pattern-list digit-sums">
+                    {topSpecialDigitSums.map((item) => (
+                      <div key={item.digitSum}>
+                        <strong>{item.digitSum}</strong>
+                        <span>{item.count} lần · {percentFormatter.format(item.rate)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              <div className="repeat-strip">
+                <h3>Giá trị đặc biệt đã lặp trong cửa sổ</h3>
+                {prizeLab.specialPrize.exactRepeats.length > 0 ? (
+                  <div>
+                    {prizeLab.specialPrize.exactRepeats.slice(0, 8).map((item) => (
+                      <button
+                        type="button"
+                        key={item.formattedNumber}
+                        onClick={() => openExplorerEvidence(item.formattedNumber, "exact", "special")}
+                      >
+                        <strong>{item.formattedNumber}</strong>
+                        <span>{item.count} lần</span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p>Không có giải đặc biệt trùng hoàn toàn trong cửa sổ này.</p>
+                )}
+              </div>
+            </article>
+
+            <article className="panel prize-groups-panel">
+              <div className="panel-heading">
+                <div>
+                  <p className="kicker">PRIZE GROUP SUMMARY</p>
+                  <h2>Không trộn nhóm giải</h2>
+                </div>
+                <span>{prizeLab.drawCount} kỳ</span>
+              </div>
+              <div className="prize-group-table" role="table" aria-label="Tóm tắt từng nhóm giải">
+                <div className="prize-group-header" role="row">
+                  <span role="columnheader">Nhóm</span>
+                  <span role="columnheader">Rộng</span>
+                  <span role="columnheader">Mẫu</span>
+                  <span role="columnheader">Phân biệt</span>
+                  <span role="columnheader">Zero đầu</span>
+                  <span role="columnheader">Đuôi chẵn</span>
+                </div>
+                {prizeLab.prizeGroups.map((summary) => (
+                  <div className="prize-group-data" role="row" key={summary.prizeGroup}>
+                    <strong role="rowheader">{PRIZE_NAMES[summary.prizeGroup] ?? summary.prizeGroup}</strong>
+                    <span role="cell">{summary.officialWidth} số</span>
+                    <span role="cell">{numberFormatter.format(summary.observations)}</span>
+                    <span role="cell">{numberFormatter.format(summary.distinctCount)}</span>
+                    <span role="cell">{percentFormatter.format(summary.leadingZeroRate)}</span>
+                    <span role="cell">{percentFormatter.format(summary.parity.evenRate)}</span>
+                  </div>
+                ))}
+              </div>
+            </article>
+          </div>
+
+          <p className="prize-lab-disclosure">
+            {PRIZE_ANALYTICS_VERSION} · dataset {data.manifest.datasetVersion} · một đài, một cửa sổ, đúng độ dài chính
+            thức. Mọi nút số mở Result Explorer để truy ngược kỳ quay gốc. Dữ liệu lịch sử không bảo đảm kết quả tương
+            lai.
+          </p>
+        </>)}
       </section>
 
       <section className="data-health" id="health">

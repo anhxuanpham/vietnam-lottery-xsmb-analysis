@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from uuid import uuid4
@@ -29,6 +30,9 @@ from xsmb_etl.xsmn_transform import (
     southern_draw_results_frame,
     southern_loto_daily_frame,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class SouthernPipeline:
@@ -68,14 +72,17 @@ class SouthernPipeline:
 
         run_id = str(uuid4())
         started_at = datetime.now(UTC)
+        logger.info('%s run started for %s (run_id=%s)', self.region_label, target_date, run_id)
         objects: list[StoredObject] = []
         quality_passed = False
         publication_committed = False
         try:
             if self.repository.bronze_complete(target_date) and not force:
+                logger.info('reusing complete bronze data for %s', target_date)
                 extracted = self.repository.load_bronze(target_date)
                 objects.extend(self.repository.bronze_objects(target_date))
             else:
+                logger.info('extracting fresh source data for %s', target_date)
                 extracted = self.extractor.extract(target_date)
                 objects.extend(
                     self.repository.write_bronze(
@@ -89,7 +96,7 @@ class SouthernPipeline:
 
             current_draw = southern_draw_results_frame([extracted.result], run_id)
             current_loto = southern_loto_daily_frame(current_draw, run_id=run_id)
-            current_gold = build_southern_gold_tables(current_draw, run_id=run_id)
+            current_gold = build_southern_gold_tables(current_draw, run_id=run_id, loto_daily=current_loto)
             pre_write_report = build_southern_quality_report(
                 [extracted.result],
                 current_draw,
@@ -114,7 +121,7 @@ class SouthernPipeline:
             maximum_date = pd_timestamp_date(all_draw['draw_date'].max())
             statuses = control_state.status_map(minimum_date, maximum_date)
             statuses[target_date] = DrawStatus.SUCCESS
-            gold_tables = build_southern_gold_tables(all_draw, run_id=run_id, statuses=statuses)
+            gold_tables = build_southern_gold_tables(all_draw, run_id=run_id, statuses=statuses, loto_daily=all_loto)
             report = build_southern_quality_report(
                 [extracted.result],
                 all_draw,
@@ -128,9 +135,11 @@ class SouthernPipeline:
             )
             require_quality(report)
             quality_passed = True
+            logger.info('quality report passed for %s (run_id=%s)', target_date, run_id)
             objects.append(self.repository.write_quality_report(report, target_date))
             gold_objects = self.repository.write_gold_tables(gold_tables, run_id=run_id, formats=('parquet',))
             objects.extend(gold_objects)
+            logger.info('wrote %d gold objects (run_id=%s)', len(gold_objects), run_id)
 
             success_manifest = RunManifest(
                 run_id=run_id,
@@ -155,6 +164,7 @@ class SouthernPipeline:
             objects.extend([snapshot, latest])
             publication_committed = True
             self.repository.publish_manifest_control_state(success_manifest)
+            logger.info('published snapshot and latest for %s (run_id=%s)', target_date, run_id)
             return PipelineRunResult(
                 run_id=run_id,
                 region=self.region,
@@ -177,6 +187,7 @@ class SouthernPipeline:
                 error_message=exc.notice,
             )
             objects.append(self.repository.write_run_manifest(no_draw_manifest))
+            logger.info('recorded no-draw for %s: %s', target_date, exc.notice)
             return PipelineRunResult(
                 run_id=run_id,
                 region=self.region,
@@ -205,7 +216,7 @@ class SouthernPipeline:
             try:
                 self.repository.write_run_manifest(failure_manifest)
             except Exception:
-                pass
+                logger.warning('failed to write failure manifest for %s', target_date, exc_info=True)
             raise
 
     def backfill(self, start_date: date, end_date: date, *, force: bool = False) -> list[PipelineRunResult]:
@@ -248,13 +259,16 @@ class SouthernPipeline:
 
         run_id = str(uuid4())
         started_at = datetime.now(UTC)
+        logger.info('%s backfill ingest started for %s (run_id=%s)', self.region_label, target_date, run_id)
         objects: list[StoredObject] = []
         quality_passed = False
         try:
             if self.repository.bronze_complete(target_date) and not force:
+                logger.info('reusing complete bronze data for %s', target_date)
                 extracted = self.repository.load_bronze(target_date)
                 objects.extend(self.repository.bronze_objects(target_date))
             else:
+                logger.info('extracting fresh source data for %s', target_date)
                 extracted = self.extractor.extract(target_date)
                 objects.extend(
                     self.repository.write_bronze(
@@ -268,7 +282,7 @@ class SouthernPipeline:
 
             current_draw = southern_draw_results_frame([extracted.result], run_id)
             current_loto = southern_loto_daily_frame(current_draw, run_id=run_id)
-            current_gold = build_southern_gold_tables(current_draw, run_id=run_id)
+            current_gold = build_southern_gold_tables(current_draw, run_id=run_id, loto_daily=current_loto)
             report = build_southern_quality_report(
                 [extracted.result],
                 current_draw,
@@ -281,6 +295,7 @@ class SouthernPipeline:
             )
             require_quality(report)
             quality_passed = True
+            logger.info('quality report passed for %s (run_id=%s)', target_date, run_id)
             objects.extend(self.repository.upsert_silver_draw_results(current_draw))
             return PipelineRunResult(
                 run_id=run_id,
@@ -306,6 +321,7 @@ class SouthernPipeline:
                 error_message=exc.notice,
             )
             objects.append(self.repository.write_run_manifest(manifest))
+            logger.info('recorded no-draw for %s: %s', target_date, exc.notice)
             return PipelineRunResult(
                 run_id=run_id,
                 region=self.region,
@@ -332,7 +348,7 @@ class SouthernPipeline:
             try:
                 self.repository.write_run_manifest(manifest)
             except Exception:
-                pass
+                logger.warning('failed to write failure manifest for %s', target_date, exc_info=True)
             raise
 
     def record_no_draw(self, target_date: date, *, detail: str) -> PipelineRunResult:
@@ -350,6 +366,7 @@ class SouthernPipeline:
             error_message=detail,
         )
         self.repository.write_run_manifest(manifest)
+        logger.info('recorded no-draw for %s: %s', target_date, detail)
         return PipelineRunResult(
             run_id=run_id,
             region=self.region,
@@ -369,13 +386,14 @@ class SouthernPipeline:
             raise ValueError(f'no {self.region_label} Silver draw results are available')
         canonical = canonical_southern_results_from_frame(all_draw)
         target_date = canonical[-1].draw_date
+        logger.info('%s gold rebuild started for %s (run_id=%s)', self.region_label, target_date, run_id)
         try:
             all_loto = southern_loto_daily_frame(all_draw, run_id=run_id)
             minimum_date = canonical[0].draw_date
             statuses = self.repository.control_state().status_map(minimum_date, target_date)
             for result in canonical:
                 statuses[result.draw_date] = DrawStatus.SUCCESS
-            gold_tables = build_southern_gold_tables(all_draw, run_id=run_id, statuses=statuses)
+            gold_tables = build_southern_gold_tables(all_draw, run_id=run_id, statuses=statuses, loto_daily=all_loto)
             report = build_southern_quality_report(
                 canonical,
                 all_draw,
@@ -388,10 +406,12 @@ class SouthernPipeline:
                 documented_partial_draws=self.documented_partial_draws,
             )
             require_quality(report)
+            logger.info('quality report passed for %s (run_id=%s)', target_date, run_id)
             objects.extend(self.repository.replace_silver_loto_daily(all_loto))
             objects.append(self.repository.write_quality_report(report, target_date))
             gold_objects = self.repository.write_gold_tables(gold_tables, run_id=run_id, formats=('parquet',))
             objects.extend(gold_objects)
+            logger.info('wrote %d gold objects (run_id=%s)', len(gold_objects), run_id)
             manifest = RunManifest(
                 run_id=run_id,
                 region=self.region,
@@ -414,6 +434,7 @@ class SouthernPipeline:
             objects.extend([snapshot, latest])
             publication_committed = True
             self.repository.publish_manifest_control_state(manifest)
+            logger.info('published snapshot and latest for %s (run_id=%s)', target_date, run_id)
             return PipelineRunResult(
                 run_id=run_id,
                 region=self.region,
@@ -440,7 +461,7 @@ class SouthernPipeline:
             try:
                 self.repository.write_run_manifest(failure)
             except Exception:
-                pass
+                logger.warning('failed to write failure manifest for %s', target_date, exc_info=True)
             raise
 
 

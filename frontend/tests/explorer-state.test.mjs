@@ -7,6 +7,8 @@ import {
   completeExplorerRequest,
   explorerQueryError,
   failExplorerRequest,
+  normalizeExplorerQuery,
+  sameExplorerQuery,
 } from "../explorer-state.ts";
 
 const query = {
@@ -15,6 +17,9 @@ const query = {
   from: "2026-01-01",
   to: "2026-07-21",
   number: "07",
+  value: null,
+  match: null,
+  prizeGroup: null,
 };
 
 function draw(date, specialPrize = "12345") {
@@ -108,4 +113,55 @@ test("Explorer query validation rejects reversed dates and partial numbers", () 
   );
   assert.match(explorerQueryError({ ...query, from: "2026-02-30" }), /ngày/i);
   assert.match(explorerQueryError({ ...query, number: "7" }), /hai chữ số/i);
+});
+
+test("Explorer state snapshots every full-prize filter and canonicalizes default exact matching", () => {
+  const exact = {
+    ...query,
+    number: null,
+    value: "005113",
+    match: "exact",
+    prizeGroup: "special",
+  };
+  const implicitExact = { ...exact };
+  delete implicitExact.match;
+  assert.equal(sameExplorerQuery(exact, implicitExact), true);
+  assert.equal(normalizeExplorerQuery(implicitExact).value, "005113");
+  assert.equal(normalizeExplorerQuery(implicitExact).match, "exact");
+  assert.equal(sameExplorerQuery(exact, { ...exact, match: "suffix" }), false);
+  assert.equal(sameExplorerQuery(exact, { ...exact, prizeGroup: "prize1" }), false);
+
+  const ready = completeExplorerRequest(
+    beginExplorerRequest(INITIAL_EXPLORER_STATE, exact, false),
+    exact,
+    [draw("2026-07-21", "005113")],
+    "full-prize-cursor",
+    false,
+  );
+  const changed = beginExplorerRequest(ready, { ...exact, value: "5113" }, true);
+  assert.deepEqual(changed.items, []);
+  assert.equal(changed.cursor, null);
+  assert.equal(changed.appending, false);
+});
+
+test("Explorer validates full-prize filters without normalizing away leading zeros", () => {
+  const fullPrize = {
+    ...query,
+    number: null,
+    value: "005113",
+    match: "exact",
+    prizeGroup: "special",
+  };
+  assert.equal(explorerQueryError(fullPrize), null);
+  assert.equal(normalizeExplorerQuery(fullPrize).value, "005113");
+  assert.equal(explorerQueryError({ ...fullPrize, value: "7" }), null);
+  assert.match(explorerQueryError({ ...fullPrize, value: "１２" }), /ASCII/i);
+  assert.match(explorerQueryError({ ...fullPrize, value: "1234567" }), /sáu/i);
+  assert.match(explorerQueryError({ ...fullPrize, match: "contains" }), /so khớp/i);
+  assert.match(explorerQueryError({ ...fullPrize, prizeGroup: "prize8" }), /nhóm giải/i);
+  assert.match(explorerQueryError({ ...fullPrize, number: "13" }), /đồng thời/i);
+  assert.match(
+    explorerQueryError({ ...query, number: null, value: null, match: "suffix" }),
+    /khi có giá trị/i,
+  );
 });

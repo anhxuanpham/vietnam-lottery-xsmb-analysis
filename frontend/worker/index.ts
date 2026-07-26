@@ -210,8 +210,12 @@ const worker = {
 
     if (url.pathname === "/api/lottery") return getLotteryData(request, env, url);
     if (url.pathname === "/api/admin/lottery") return putLotteryData(request, env, url);
-    if (url.pathname === "/api/v2/lottery") return handleLotteryV2Metadata(request, env, url);
-    if (url.pathname === "/api/v2/results") return handleLotteryV2Results(request, env, url);
+    if (url.pathname === "/api/v2/lottery") {
+      return handleLotteryV2Metadata(request, env, url, { waitUntil: (promise) => ctx.waitUntil(promise) });
+    }
+    if (url.pathname === "/api/v2/results") {
+      return handleLotteryV2Results(request, env, url, { waitUntil: (promise) => ctx.waitUntil(promise) });
+    }
     if (url.pathname === "/api/admin/lottery-v2") return handleLotteryV2Ingest(request, env, url);
     if (url.pathname === "/api/health/lottery") return handleLotteryHealthRequest(request, env);
     if (url.pathname === "/api/ops/lottery") return handleLotteryWatchdogStatus(request, env);

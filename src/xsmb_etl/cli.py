@@ -425,7 +425,7 @@ def _validate(
             canonical = canonical_southern_results_from_frame(draw)
         loto = southern_loto_daily_frame(draw, run_id=run_id)
         statuses = {result.draw_date: DrawStatus.SUCCESS for result in canonical}
-        gold = build_southern_gold_tables(draw, run_id=run_id, statuses=statuses)
+        gold = build_southern_gold_tables(draw, run_id=run_id, statuses=statuses, loto_daily=loto)
         quality_builder = (
             build_central_quality_report if region is LotteryRegion.XSMT else build_southern_quality_report
         )
@@ -455,7 +455,7 @@ def _validate(
         canonical = canonical_results_from_frame(draw)
     loto = loto_daily_frame(draw, run_id=run_id)
     statuses = {result.draw_date: DrawStatus.SUCCESS for result in canonical}
-    gold = build_gold_tables(draw, run_id=run_id, statuses=statuses)
+    gold = build_gold_tables(draw, run_id=run_id, statuses=statuses, loto_daily=loto)
     return build_quality_report(
         canonical,
         draw,

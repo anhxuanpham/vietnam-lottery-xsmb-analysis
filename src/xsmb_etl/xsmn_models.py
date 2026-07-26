@@ -9,6 +9,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from xsmb_etl.models import prizes_from_groups, validate_group_completeness, validate_prize_against_spec
+
 
 class SouthernPrizeGroup(StrEnum):
     PRIZE8 = 'prize8'
@@ -63,13 +65,7 @@ class SouthernPrize(BaseModel):
 
     @model_validator(mode='after')
     def validate_against_group_spec(self) -> SouthernPrize:
-        spec = SOUTHERN_PRIZE_SPECS[self.prize_group]
-        if self.prize_width != spec.width:
-            raise ValueError(f'{self.prize_group.value} must use width {spec.width}')
-        if self.prize_order > spec.count:
-            raise ValueError(f'{self.prize_group.value} order must be at most {spec.count}')
-        if self.full_number >= 10**self.prize_width:
-            raise ValueError(f'{self.prize_group.value} value is outside its numeric range')
+        validate_prize_against_spec(self, SOUTHERN_PRIZE_SPECS)
         return self
 
 
@@ -89,12 +85,7 @@ class SouthernStationResult(BaseModel):
     def validate_complete_station_draw(self) -> SouthernStationResult:
         if len(self.prizes) != SOUTHERN_EXPECTED_RESULT_COUNT:
             raise ValueError(f'a station draw must contain exactly {SOUTHERN_EXPECTED_RESULT_COUNT} prizes')
-        for group, spec in SOUTHERN_PRIZE_SPECS.items():
-            group_prizes = self.prizes_for(group)
-            if len(group_prizes) != spec.count:
-                raise ValueError(f'{group.value} expected {spec.count} values, got {len(group_prizes)}')
-            if [prize.prize_order for prize in group_prizes] != list(range(1, spec.count + 1)):
-                raise ValueError(f'{group.value} prize order must be unique and consecutive')
+        validate_group_completeness(self, SOUTHERN_PRIZE_SPECS)
         return self
 
     @classmethod
@@ -108,42 +99,19 @@ class SouthernStationResult(BaseModel):
         source_url: str,
         groups: Mapping[str | SouthernPrizeGroup, Sequence[str | int]],
     ) -> SouthernStationResult:
-        normalized: dict[SouthernPrizeGroup, Sequence[str | int]] = {}
-        for raw_group, values in groups.items():
-            group = raw_group if isinstance(raw_group, SouthernPrizeGroup) else SouthernPrizeGroup(raw_group)
-            if group in normalized:
-                raise ValueError(f'duplicate group: {group.value}')
-            normalized[group] = values
-
-        prizes: list[SouthernPrize] = []
-        for group, spec in SOUTHERN_PRIZE_SPECS.items():
-            values = normalized.get(group, ())
-            if len(values) != spec.count:
-                raise ValueError(f'{group.value} expected {spec.count} values, got {len(values)}')
-            for order, raw_value in enumerate(values, start=1):
-                text = str(raw_value).strip()
-                if isinstance(raw_value, bool) or not text.isascii() or not text.isdigit():
-                    raise ValueError(f'{group.value} value must contain only ASCII digits')
-                if isinstance(raw_value, str) and len(text) != spec.width:
-                    raise ValueError(f'{group.value} value must contain exactly {spec.width} digits')
-                if len(text) > spec.width:
-                    raise ValueError(f'{group.value} value must contain exactly {spec.width} digits')
-                prizes.append(
-                    SouthernPrize(
-                        prize_group=group,
-                        prize_order=order,
-                        prize_width=spec.width,
-                        full_number=int(text),
-                    )
-                )
-
+        prizes = prizes_from_groups(
+            groups,
+            group_enum=SouthernPrizeGroup,
+            specs=SOUTHERN_PRIZE_SPECS,
+            prize_class=SouthernPrize,
+        )
         return cls(
             draw_date=draw_date,
             station_code=station_code.upper(),
             station_name=station_name.strip(),
             station_url=station_url,
             source_url=source_url,
-            prizes=tuple(prizes),
+            prizes=prizes,
         )
 
     def prizes_for(self, group: SouthernPrizeGroup) -> tuple[SouthernPrize, ...]:

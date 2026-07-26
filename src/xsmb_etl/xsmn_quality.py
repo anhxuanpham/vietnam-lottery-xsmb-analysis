@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
-from typing import Any
 
 import pandas as pd
 
 from xsmb_etl.control import DrawStatus
-from xsmb_etl.quality import QualityCheck, QualityReport, QualitySeverity
+from xsmb_etl.quality import QualityCheck, QualityReport, QualitySeverity, _check
 from xsmb_etl.run_models import LotteryRegion
 from xsmb_etl.station_calendar import expected_station_codes
 from xsmb_etl.xsmn_models import SOUTHERN_EXPECTED_RESULT_COUNT, SOUTHERN_PRIZE_SPECS, SouthernDailyResult
@@ -159,20 +158,3 @@ def build_southern_quality_report(
         )
 
     return QualityReport(run_id=run_id, target_dates=target_dates, checks=tuple(checks))
-
-
-def _check(
-    name: str,
-    passed: bool,
-    message: str,
-    *,
-    severity: QualitySeverity = QualitySeverity.CRITICAL,
-    details: dict[str, Any] | None = None,
-) -> QualityCheck:
-    return QualityCheck(
-        name=name,
-        severity=severity,
-        passed=bool(passed),
-        message=message,
-        details=details or {},
-    )

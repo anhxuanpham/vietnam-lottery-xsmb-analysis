@@ -1,13 +1,19 @@
 /** Read-only station/year API for the versioned historical result explorer. */
 import {
+  isLotteryPrizeGroup,
+  isLotteryPrizeMatch,
   isLotteryDashboardData,
   isLotteryRegion,
   isLotteryV2ReleaseMetadata,
   isLotteryV2Shard,
   isLotteryV2ShardPayload,
+  lotteryDrawMatchesPrizeFilter,
+  lotteryPrizeGroupSupported,
   LOTTERY_REGIONS,
   type LotteryDashboardData,
   type LotteryDraw,
+  type LotteryPrizeGroup,
+  type LotteryPrizeMatch,
   type LotteryRegion,
   type LotteryV2ReleaseMetadata,
   type LotteryV2Shard,
@@ -17,6 +23,10 @@ const DEFAULT_LIMIT = 25;
 const MAX_LIMIT = 100;
 const MAX_METADATA_BYTES = 100 * 1024;
 const MAX_SHARD_BYTES = 2 * 1024 * 1024;
+const MAX_SHARDS_PER_REQUEST = 8;
+const CACHE_ORIGIN = "https://lottery-cache.internal";
+const METADATA_CACHE_SECONDS = 60;
+const SHARD_CACHE_SECONDS = 86400;
 const MAX_RESPONSE_BYTES = 250 * 1024;
 const MAX_INGEST_BYTES = 2 * 1024 * 1024;
 const MAX_PUBLISHED_BOUNDARY_BYTES = 8 * 1024 * 1024;
@@ -24,6 +34,7 @@ const MAX_METADATA_CAS_ATTEMPTS = 3;
 const V2_HEALTH_ACTIVATION_KEY = "v2/health/required.json";
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const NUMBER_PATTERN = /^\d{2}$/;
+const PRIZE_VALUE_PATTERN = /^[0-9]{1,6}$/;
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "x-content-type-options": "nosniff",
@@ -35,6 +46,9 @@ type Query = {
   from: string | null;
   to: string | null;
   number: string | null;
+  value: string | null;
+  match: LotteryPrizeMatch | null;
+  prizeGroup: LotteryPrizeGroup | null;
   limit: number;
   cursor: string | null;
 };
@@ -44,6 +58,21 @@ type CursorPayload = {
   releaseId: string;
   fingerprint: string;
   beforeDate: string;
+};
+
+type LotteryV2EdgeCache = {
+  match(url: string): Promise<Response | undefined>;
+  put(url: string, response: Response): Promise<unknown>;
+};
+
+export type LotteryV2CacheContext = {
+  cache?: LotteryV2EdgeCache;
+  waitUntil?: (promise: Promise<unknown>) => void;
+};
+
+type ResolvedCacheContext = {
+  cache: LotteryV2EdgeCache;
+  waitUntil?: (promise: Promise<unknown>) => void;
 };
 
 type MetadataPointerState = {
@@ -168,16 +197,73 @@ export function lotteryV2ShardKey(
   return `v2/releases/${releaseId}/regions/${region}/stations/${station}/years/${year}.json`;
 }
 
-async function readMetadata(env: Env, region: LotteryRegion): Promise<LotteryV2ReleaseMetadata | null> {
+function resolveCacheContext(context: LotteryV2CacheContext | undefined): ResolvedCacheContext | undefined {
+  const cache = context?.cache ?? edgeCacheDefault();
+  return cache ? { cache, waitUntil: context?.waitUntil } : undefined;
+}
+
+function edgeCacheDefault(): LotteryV2EdgeCache | undefined {
+  // Feature-detected so Node-based tests and local dev run without the Workers Cache API.
+  return (globalThis as { caches?: { default?: LotteryV2EdgeCache } }).caches?.default;
+}
+
+async function readCachedJson(context: ResolvedCacheContext, url: string): Promise<unknown> {
+  try {
+    const hit = await context.cache.match(url);
+    return hit ? await hit.json() : undefined;
+  } catch {
+    // An unreadable cache entry is a miss; serving falls back to R2.
+    return undefined;
+  }
+}
+
+async function writeCachedJson(
+  context: ResolvedCacheContext,
+  url: string,
+  body: string,
+  maxAgeSeconds: number,
+): Promise<void> {
+  const write = (async () => {
+    try {
+      await context.cache.put(url, new Response(body, {
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": `public, max-age=${maxAgeSeconds}`,
+        },
+      }));
+    } catch {
+      // Cache writes are best-effort; every miss falls back to R2.
+    }
+  })();
+  if (context.waitUntil) {
+    context.waitUntil(write);
+    return;
+  }
+  await write;
+}
+
+async function readMetadata(
+  env: Env,
+  region: LotteryRegion,
+  cache?: ResolvedCacheContext,
+  options?: { bypassCachedRead?: boolean },
+): Promise<LotteryV2ReleaseMetadata | null> {
+  const cacheUrl = `${CACHE_ORIGIN}/v2/regions/${region}/latest`;
+  if (cache && !options?.bypassCachedRead) {
+    const cached = await readCachedJson(cache, cacheUrl);
+    if (isLotteryV2ReleaseMetadata(cached, region)) return cached;
+  }
   const object = await env.LOTTERY_DATA.get(lotteryV2MetadataKey(region));
   if (!object) return null;
   if (object.size >= MAX_METADATA_BYTES) {
     throw new Error(`Lottery v2 metadata exceeds ${MAX_METADATA_BYTES} bytes`);
   }
-  const payload: unknown = await object.json();
+  const body = await object.text();
+  const payload: unknown = JSON.parse(body);
   if (!isLotteryV2ReleaseMetadata(payload, region)) {
     throw new Error("Lottery v2 metadata failed contract validation");
   }
+  if (cache) await writeCachedJson(cache, cacheUrl, body, METADATA_CACHE_SECONDS);
   return payload;
 }
 
@@ -195,6 +281,9 @@ function parseQuery(url: URL): Query {
   const from = singleParameter(url, "from");
   const to = singleParameter(url, "to");
   const number = singleParameter(url, "number");
+  const value = singleParameter(url, "value");
+  const rawMatch = singleParameter(url, "match");
+  const rawPrizeGroup = singleParameter(url, "prizeGroup");
   const rawLimit = singleParameter(url, "limit");
   const cursor = singleParameter(url, "cursor");
   if (station === null || !/^[A-Za-z0-9]{2,8}$/.test(station)) {
@@ -212,15 +301,51 @@ function parseQuery(url: URL): Query {
   if (number !== null && !NUMBER_PATTERN.test(number)) {
     throw new ApiInputError("invalid_number", "number must contain exactly two digits from 00 to 99");
   }
+  if (value !== null && !PRIZE_VALUE_PATTERN.test(value)) {
+    throw new ApiInputError("invalid_value", "value must contain from one to six ASCII digits");
+  }
+  if (rawMatch !== null && !isLotteryPrizeMatch(rawMatch)) {
+    throw new ApiInputError("invalid_match", "match must be exact or suffix");
+  }
+  if (rawPrizeGroup !== null &&
+    (!isLotteryPrizeGroup(rawPrizeGroup) || !lotteryPrizeGroupSupported(region, rawPrizeGroup))) {
+    throw new ApiInputError("invalid_prize_group", "prizeGroup is not supported for this region");
+  }
+  if (number !== null && (value !== null || rawMatch !== null || rawPrizeGroup !== null)) {
+    throw new ApiInputError("conflicting_filters", "number cannot be combined with full-prize filters");
+  }
+  if (value === null && (rawMatch !== null || rawPrizeGroup !== null)) {
+    throw new ApiInputError("incomplete_prize_filter", "match and prizeGroup require value");
+  }
   const limit = rawLimit === null ? DEFAULT_LIMIT : Number(rawLimit);
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
     throw new ApiInputError("invalid_limit", `limit must be an integer from 1 to ${MAX_LIMIT}`);
   }
-  return { region, station, from, to, number, limit, cursor };
+  return {
+    region,
+    station,
+    from,
+    to,
+    number,
+    value,
+    match: value === null ? null : (rawMatch ?? "exact") as LotteryPrizeMatch,
+    prizeGroup: rawPrizeGroup as LotteryPrizeGroup | null,
+    limit,
+    cursor,
+  };
 }
 
 function queryFingerprint(query: Query): string {
-  return [query.region, query.station, query.from ?? "", query.to ?? "", query.number ?? ""].join("|");
+  return [
+    query.region,
+    query.station,
+    query.from ?? "",
+    query.to ?? "",
+    query.number ?? "",
+    query.value ?? "",
+    query.match ?? "",
+    query.prizeGroup ?? "",
+  ].join("|");
 }
 
 function encodeCursor(cursor: CursorPayload): string {
@@ -253,15 +378,24 @@ async function readShard(
   metadata: LotteryV2ReleaseMetadata,
   stationCode: string,
   year: number,
+  cache?: ResolvedCacheContext,
 ): Promise<LotteryV2Shard> {
+  const cacheUrl =
+    `${CACHE_ORIGIN}/v2/releases/${metadata.releaseId}/regions/${metadata.region}/stations/${stationCode}/years/${year}`;
+  if (cache) {
+    const cached = await readCachedJson(cache, cacheUrl);
+    if (isLotteryV2Shard(cached, metadata, stationCode, year)) return cached;
+  }
   const key = lotteryV2ShardKey(metadata.releaseId, metadata.region, stationCode, year);
   const object = await env.LOTTERY_DATA.get(key);
   if (!object) throw new Error(`Lottery v2 release is incomplete: ${key} is missing`);
   if (object.size > MAX_SHARD_BYTES) throw new Error(`Lottery v2 shard exceeds ${MAX_SHARD_BYTES} bytes`);
-  const payload: unknown = await object.json();
+  const body = await object.text();
+  const payload: unknown = JSON.parse(body);
   if (!isLotteryV2Shard(payload, metadata, stationCode, year)) {
     throw new Error(`Lottery v2 shard failed contract validation: ${key}`);
   }
+  if (cache) await writeCachedJson(cache, cacheUrl, body, SHARD_CACHE_SECONDS);
   return payload;
 }
 
@@ -274,23 +408,31 @@ async function readResultPage(
   effectiveFrom: string,
   effectiveTo: string,
   beforeDate: string | null,
-): Promise<{ items: LotteryDraw[]; hasMore: boolean }> {
-  const matches: LotteryDraw[] = [];
+  cache?: ResolvedCacheContext,
+): Promise<{ items: LotteryDraw[]; resumeBeforeDate: string | null }> {
   const beforeYear = beforeDate === null ? null : Number(beforeDate.slice(0, 4));
-  for (const year of [...years].sort((left, right) => right - left)) {
-    if (beforeYear !== null && year > beforeYear) continue;
-    const shard = await readShard(env, metadata, stationCode, year);
+  const pendingYears = [...years]
+    .sort((left, right) => right - left)
+    .filter((year) => beforeYear === null || year <= beforeYear);
+  const matches: LotteryDraw[] = [];
+  let scannedYears = 0;
+  for (const year of pendingYears) {
+    const shard = await readShard(env, metadata, stationCode, year, cache);
+    scannedYears += 1;
     matches.push(...shard.draws
       .filter((draw) => draw.date >= effectiveFrom && draw.date <= effectiveTo)
       .filter((draw) => beforeDate === null || draw.date < beforeDate)
-      .filter((draw) => query.number === null || draw.numbers.includes(query.number))
+      .filter((draw) => lotteryDrawMatchesPrizeFilter(draw, query))
       .sort((left, right) => right.date.localeCompare(left.date)));
-    if (matches.length > query.limit) break;
+    if (matches.length > query.limit) {
+      return { items: matches.slice(0, query.limit), resumeBeforeDate: matches[query.limit - 1].date };
+    }
+    if (scannedYears >= MAX_SHARDS_PER_REQUEST) break;
   }
-  return {
-    items: matches.slice(0, query.limit),
-    hasMore: matches.length > query.limit,
-  };
+  if (scannedYears >= pendingYears.length) return { items: matches, resumeBeforeDate: null };
+  // Every draw dated on or after Jan 1 of the oldest scanned year has been considered, so a
+  // year-boundary cursor resumes the scan below it without skipping or duplicating draws.
+  return { items: matches, resumeBeforeDate: `${pendingYears[scannedYears - 1]}-01-01` };
 }
 
 function inputErrorResponse(error: ApiInputError): Response {
@@ -503,11 +645,16 @@ async function activateV2HealthIfReady(env: Env, activatedAt: string): Promise<v
   );
 }
 
-export async function handleLotteryV2Metadata(request: Request, env: Env, url: URL): Promise<Response> {
+export async function handleLotteryV2Metadata(
+  request: Request,
+  env: Env,
+  url: URL,
+  context?: LotteryV2CacheContext,
+): Promise<Response> {
   if (request.method !== "GET") return responseJson({ error: "method_not_allowed" }, 405, { allow: "GET" });
   try {
     const region = parseRegion(url);
-    const metadata = await readMetadata(env, region);
+    const metadata = await readMetadata(env, region, resolveCacheContext(context));
     if (!metadata) return responseJson({ error: "release_unavailable", region }, 503);
     return responseJson(metadata, 200, {
       "cache-control": "public, max-age=300, stale-while-revalidate=3600",
@@ -523,12 +670,30 @@ export async function handleLotteryV2Metadata(request: Request, env: Env, url: U
   }
 }
 
-export async function handleLotteryV2Results(request: Request, env: Env, url: URL): Promise<Response> {
+export async function handleLotteryV2Results(
+  request: Request,
+  env: Env,
+  url: URL,
+  context?: LotteryV2CacheContext,
+): Promise<Response> {
   if (request.method !== "GET") return responseJson({ error: "method_not_allowed" }, 405, { allow: "GET" });
   try {
     const query = parseQuery(url);
-    const metadata = await readMetadata(env, query.region);
+    const cache = resolveCacheContext(context);
+    let metadata = await readMetadata(env, query.region, cache);
     if (!metadata) return responseJson({ error: "release_unavailable", region: query.region }, 503);
+    if (query.cursor !== null && cache) {
+      try {
+        const cursorRelease = decodeCursor(query.cursor).releaseId;
+        if (cursorRelease !== metadata.releaseId) {
+          // A cached pointer can lag a fresh publish by up to METADATA_CACHE_SECONDS,
+          // so re-read the source of truth before rejecting the cursor as stale.
+          metadata = (await readMetadata(env, query.region, cache, { bypassCachedRead: true })) ?? metadata;
+        }
+      } catch {
+        // Malformed cursors keep their original error path below.
+      }
+    }
     const station = metadata.stations.find((candidate) => candidate.code === query.station);
     if (!station) {
       return responseJson(
@@ -562,16 +727,17 @@ export async function handleLotteryV2Results(request: Request, env: Env, url: UR
       effectiveFrom,
       effectiveTo,
       beforeDate,
+      cache,
     );
     const items = page.items;
-    const nextCursor = page.hasMore && items.length > 0
-      ? encodeCursor({
+    const nextCursor = page.resumeBeforeDate === null
+      ? null
+      : encodeCursor({
           version: 2,
           releaseId: metadata.releaseId,
           fingerprint,
-          beforeDate: items.at(-1)?.date ?? effectiveFrom,
-        })
-      : null;
+          beforeDate: page.resumeBeforeDate,
+        });
     const body = {
       schemaVersion: 2,
       source: "r2",
@@ -584,6 +750,9 @@ export async function handleLotteryV2Results(request: Request, env: Env, url: UR
         from: query.from,
         to: query.to,
         number: query.number,
+        value: query.value,
+        match: query.match,
+        prizeGroup: query.prizeGroup,
       },
       page: { limit: query.limit, returned: items.length, nextCursor },
       items,

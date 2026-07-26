@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, date, datetime
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -20,6 +21,9 @@ from xsmb_etl.run_models import (
 )
 from xsmb_etl.storage import StoredObject
 from xsmb_etl.transform import canonical_results_from_frame, draw_results_frame, loto_daily_frame
+
+
+logger = logging.getLogger(__name__)
 
 
 class Pipeline:
@@ -50,14 +54,22 @@ class Pipeline:
 
         run_id = str(uuid4())
         started_at = datetime.now(UTC)
+        logger.info(
+            '%s run started for %s (run_id=%s)',
+            self.repository.region.value.upper(),
+            target_date,
+            run_id,
+        )
         objects: list[StoredObject] = []
         quality_passed = False
         publication_committed = False
         try:
             if self.repository.bronze_complete(target_date) and not force:
+                logger.info('reusing complete bronze data for %s', target_date)
                 extracted = self.repository.load_bronze(target_date)
                 objects.extend(self.repository.bronze_objects(target_date))
             else:
+                logger.info('extracting fresh source data for %s', target_date)
                 extracted = self.extractor.extract(target_date)
                 objects.extend(
                     self.repository.write_bronze(
@@ -71,7 +83,7 @@ class Pipeline:
 
             current_draw = draw_results_frame([extracted.result], run_id)
             current_loto = loto_daily_frame(current_draw, run_id=run_id)
-            current_gold = build_gold_tables(current_draw, run_id=run_id)
+            current_gold = build_gold_tables(current_draw, run_id=run_id, loto_daily=current_loto)
             pre_write_report = build_quality_report(
                 [extracted.result],
                 current_draw,
@@ -94,7 +106,7 @@ class Pipeline:
             maximum_date = all_draw['draw_date'].max().date()
             statuses = control_state.status_map(minimum_date, maximum_date)
             statuses[target_date] = DrawStatus.SUCCESS
-            gold_tables = build_gold_tables(all_draw, run_id=run_id, statuses=statuses)
+            gold_tables = build_gold_tables(all_draw, run_id=run_id, statuses=statuses, loto_daily=all_loto)
             report = build_quality_report(
                 [extracted.result],
                 all_draw,
@@ -106,9 +118,11 @@ class Pipeline:
             )
             require_quality(report)
             quality_passed = True
+            logger.info('quality report passed for %s (run_id=%s)', target_date, run_id)
             objects.append(self.repository.write_quality_report(report, target_date))
             gold_objects = self.repository.write_gold_tables(gold_tables, run_id=run_id, formats=('parquet',))
             objects.extend(gold_objects)
+            logger.info('wrote %d gold objects (run_id=%s)', len(gold_objects), run_id)
 
             success_manifest = RunManifest(
                 run_id=run_id,
@@ -132,6 +146,7 @@ class Pipeline:
             objects.extend([snapshot, latest])
             publication_committed = True
             self.repository.publish_manifest_control_state(success_manifest)
+            logger.info('published snapshot and latest for %s (run_id=%s)', target_date, run_id)
             return PipelineRunResult(
                 run_id=run_id,
                 region=self.repository.region,
@@ -154,6 +169,7 @@ class Pipeline:
                 error_message=exc.notice,
             )
             objects.append(self.repository.write_run_manifest(no_draw_manifest))
+            logger.info('recorded no-draw for %s: %s', target_date, exc.notice)
             return PipelineRunResult(
                 run_id=run_id,
                 region=self.repository.region,
@@ -182,7 +198,7 @@ class Pipeline:
             try:
                 self.repository.write_run_manifest(failure_manifest)
             except Exception:
-                pass
+                logger.warning('failed to write failure manifest for %s', target_date, exc_info=True)
             raise
 
     def backfill(self, start_date: date, end_date: date, *, force: bool = False) -> list[PipelineRunResult]:
@@ -225,13 +241,21 @@ class Pipeline:
 
         run_id = str(uuid4())
         started_at = datetime.now(UTC)
+        logger.info(
+            '%s backfill ingest started for %s (run_id=%s)',
+            self.repository.region.value.upper(),
+            target_date,
+            run_id,
+        )
         objects: list[StoredObject] = []
         quality_passed = False
         try:
             if self.repository.bronze_complete(target_date) and not force:
+                logger.info('reusing complete bronze data for %s', target_date)
                 extracted = self.repository.load_bronze(target_date)
                 objects.extend(self.repository.bronze_objects(target_date))
             else:
+                logger.info('extracting fresh source data for %s', target_date)
                 extracted = self.extractor.extract(target_date)
                 objects.extend(
                     self.repository.write_bronze(
@@ -245,7 +269,7 @@ class Pipeline:
 
             current_draw = draw_results_frame([extracted.result], run_id)
             current_loto = loto_daily_frame(current_draw, run_id=run_id)
-            current_gold = build_gold_tables(current_draw, run_id=run_id)
+            current_gold = build_gold_tables(current_draw, run_id=run_id, loto_daily=current_loto)
             report = build_quality_report(
                 [extracted.result],
                 current_draw,
@@ -256,6 +280,7 @@ class Pipeline:
             )
             require_quality(report)
             quality_passed = True
+            logger.info('quality report passed for %s (run_id=%s)', target_date, run_id)
             objects.extend(self.repository.upsert_silver_draw_results(current_draw))
             return PipelineRunResult(
                 run_id=run_id,
@@ -279,6 +304,7 @@ class Pipeline:
                 error_message=exc.notice,
             )
             objects.append(self.repository.write_run_manifest(manifest))
+            logger.info('recorded no-draw for %s: %s', target_date, exc.notice)
             return PipelineRunResult(
                 run_id=run_id,
                 region=self.repository.region,
@@ -305,7 +331,7 @@ class Pipeline:
             try:
                 self.repository.write_run_manifest(manifest)
             except Exception:
-                pass
+                logger.warning('failed to write failure manifest for %s', target_date, exc_info=True)
             raise
 
     def record_no_draw(self, target_date: date, *, detail: str) -> PipelineRunResult:
@@ -323,6 +349,7 @@ class Pipeline:
             error_message=detail,
         )
         self.repository.write_run_manifest(manifest)
+        logger.info('recorded no-draw for %s: %s', target_date, detail)
         return PipelineRunResult(
             run_id=run_id,
             region=self.repository.region,
@@ -342,13 +369,19 @@ class Pipeline:
             raise ValueError('no Silver draw results are available')
         canonical = canonical_results_from_frame(all_draw)
         target_date = canonical[-1].draw_date
+        logger.info(
+            '%s gold rebuild started for %s (run_id=%s)',
+            self.repository.region.value.upper(),
+            target_date,
+            run_id,
+        )
         try:
             all_loto = loto_daily_frame(all_draw, run_id=run_id)
             minimum_date = canonical[0].draw_date
             statuses = self.repository.control_state().status_map(minimum_date, target_date)
             for result in canonical:
                 statuses[result.draw_date] = DrawStatus.SUCCESS
-            gold_tables = build_gold_tables(all_draw, run_id=run_id, statuses=statuses)
+            gold_tables = build_gold_tables(all_draw, run_id=run_id, statuses=statuses, loto_daily=all_loto)
             report = build_quality_report(
                 canonical,
                 all_draw,
@@ -359,10 +392,12 @@ class Pipeline:
                 today=datetime.now(ZoneInfo('Asia/Ho_Chi_Minh')).date(),
             )
             require_quality(report)
+            logger.info('quality report passed for %s (run_id=%s)', target_date, run_id)
             objects.extend(self.repository.replace_silver_loto_daily(all_loto))
             objects.append(self.repository.write_quality_report(report, target_date))
             gold_objects = self.repository.write_gold_tables(gold_tables, run_id=run_id, formats=('parquet',))
             objects.extend(gold_objects)
+            logger.info('wrote %d gold objects (run_id=%s)', len(gold_objects), run_id)
             manifest = RunManifest(
                 run_id=run_id,
                 target_date=target_date,
@@ -384,6 +419,7 @@ class Pipeline:
             objects.extend([snapshot, latest])
             publication_committed = True
             self.repository.publish_manifest_control_state(manifest)
+            logger.info('published snapshot and latest for %s (run_id=%s)', target_date, run_id)
             return PipelineRunResult(
                 run_id=run_id,
                 target_date=target_date,
@@ -408,7 +444,7 @@ class Pipeline:
             try:
                 self.repository.write_run_manifest(failure)
             except Exception:
-                pass
+                logger.warning('failed to write failure manifest for %s', target_date, exc_info=True)
             raise
 
 

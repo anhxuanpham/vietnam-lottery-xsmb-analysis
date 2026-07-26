@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -25,6 +26,9 @@ from xsmb_etl.run_models import (
 )
 from xsmb_etl.storage import StoredObject
 from xsmb_etl.transform import draw_results_frame, loto_daily_frame
+
+
+logger = logging.getLogger(__name__)
 
 
 class MigrationValidationError(RuntimeError):
@@ -77,7 +81,7 @@ class HistoricalMigrator:
             draw = draw_results_frame(canonical, run_id)
             loto = loto_daily_frame(draw, run_id=run_id)
             statuses = self._migration_statuses(report)
-            gold_tables = build_gold_tables(draw, run_id=run_id, statuses=statuses)
+            gold_tables = build_gold_tables(draw, run_id=run_id, statuses=statuses, loto_daily=loto)
             quality = build_quality_report(
                 canonical,
                 draw,
@@ -143,7 +147,7 @@ class HistoricalMigrator:
             try:
                 self.repository.write_run_manifest(failure_manifest)
             except Exception:
-                pass
+                logger.warning('failed to write failure manifest for %s', target_date, exc_info=True)
             raise
 
     def _publication_is_complete(self, manifest: RunManifest) -> bool:

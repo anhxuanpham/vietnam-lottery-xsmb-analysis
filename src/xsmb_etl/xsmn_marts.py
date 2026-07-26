@@ -55,6 +55,7 @@ def build_southern_gold_tables(
     *,
     run_id: str,
     statuses: dict[date, DrawStatus] | None = None,
+    loto_daily: pd.DataFrame | None = None,
 ) -> dict[str, pd.DataFrame]:
     if draw_results.empty:
         raise ValueError('cannot build XSMN Gold tables from an empty draw result dataset')
@@ -62,7 +63,12 @@ def build_southern_gold_tables(
     fact_draw_result = draw_results.copy()
     fact_draw_result['run_id'] = run_id
     fact_draw_result['run_id'] = fact_draw_result['run_id'].astype('string')
-    fact_loto_daily = southern_loto_daily_frame(fact_draw_result, run_id=run_id)
+    if loto_daily is None:
+        fact_loto_daily = southern_loto_daily_frame(fact_draw_result, run_id=run_id)
+    else:
+        fact_loto_daily = loto_daily.copy()
+        fact_loto_daily['run_id'] = run_id
+        fact_loto_daily['run_id'] = fact_loto_daily['run_id'].astype('string')
     fact_special_prize = southern_special_prize_frame(fact_draw_result)
     minimum_date = pd.Timestamp(fact_draw_result['draw_date'].min()).date()
     maximum_date = pd.Timestamp(fact_draw_result['draw_date'].max()).date()

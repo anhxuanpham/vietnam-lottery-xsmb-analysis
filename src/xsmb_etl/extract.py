@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -11,11 +12,13 @@ from bs4 import BeautifulSoup, Tag
 from cloudscraper import CloudScraper
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import RequestException, Timeout
-from tenacity import Retrying, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import Retrying, before_sleep_log, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from xsmb_etl.config import Settings
 from xsmb_etl.models import LotteryResult, PRIZE_SPECS, PrizeGroup
 
+
+logger = logging.getLogger(__name__)
 
 TRANSIENT_HTTP_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504})
 SECTION_ID_PATTERN = re.compile(r'^kqngay_(\d{8})$')
@@ -93,6 +96,7 @@ class ResultExtractor:
         if not raw_response:
             raise SourcePageError(f'source returned an empty response for {url}')
         result = parse_result_page(raw_response, selected_date=selected_date, source_url=url)
+        logger.info('extracted XSMB result for %s', selected_date)
         return ExtractedResult(raw_response=raw_response, result=result)
 
     def build_source_url(self, selected_date: date) -> str:
@@ -105,6 +109,7 @@ class ResultExtractor:
             wait=wait_exponential(multiplier=self.settings.http_retry_backoff_seconds, max=30),
             retry=retry_if_exception_type(TransientExtractionError),
             reraise=True,
+            before_sleep=before_sleep_log(logger, logging.WARNING),
         )
         for attempt in retrying:
             with attempt:

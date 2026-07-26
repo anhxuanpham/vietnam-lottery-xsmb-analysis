@@ -1,4 +1,5 @@
 import {
+  lotteryDrawMatchesPrizeFilter,
   normalizeLotteryDashboardData,
   normalizeLotteryV2ReleaseMetadata,
   normalizeLotteryV2ResultsPage,
@@ -8,7 +9,10 @@ import {
   type LotteryV2ReleaseMetadata,
   type LotteryV2ResultsPage,
 } from "./lottery-contract.ts";
-import type { ExplorerQuery } from "./explorer-state.ts";
+import {
+  normalizeExplorerQuery,
+  type ExplorerQuery,
+} from "./explorer-state.ts";
 
 export type DashboardMetadata = LotteryV2ReleaseMetadata | LotteryDashboardData;
 export type ServingMode = "v2" | "v1";
@@ -106,29 +110,60 @@ function responseMatchesQuery(
   query: ExplorerQuery,
   limit: number,
 ): boolean {
-  return page.region === query.region &&
-    page.query.station === query.station &&
-    page.query.from === query.from &&
-    page.query.to === query.to &&
-    page.query.number === query.number &&
+  const normalized = normalizeExplorerQuery(query);
+  return page.region === normalized.region &&
+    page.query.station === normalized.station &&
+    page.query.from === normalized.from &&
+    page.query.to === normalized.to &&
+    page.query.number === normalized.number &&
+    page.query.value === normalized.value &&
+    page.query.match === normalized.match &&
+    page.query.prizeGroup === normalized.prizeGroup &&
     page.page.limit === limit;
 }
+
+// The worker bounds each request to a fixed number of year shards, so a page can
+// legitimately be empty while its cursor still points at unscanned older years.
+const MAX_EMPTY_PAGE_SKIPS = 25;
 
 export async function fetchExplorerPage(
   query: ExplorerQuery,
   expectedReleaseId: string,
   options: ExplorerFetchOptions = {},
 ): Promise<LotteryV2ResultsPage> {
+  let page = await fetchExplorerPageOnce(query, expectedReleaseId, options);
+  for (
+    let skips = 0;
+    page.items.length === 0 && page.page.nextCursor !== null && skips < MAX_EMPTY_PAGE_SKIPS;
+    skips += 1
+  ) {
+    page = await fetchExplorerPageOnce(query, expectedReleaseId, {
+      ...options,
+      cursor: page.page.nextCursor,
+    });
+  }
+  return page;
+}
+
+async function fetchExplorerPageOnce(
+  query: ExplorerQuery,
+  expectedReleaseId: string,
+  options: ExplorerFetchOptions = {},
+): Promise<LotteryV2ResultsPage> {
   const fetcher = options.fetcher ?? fetch;
   const limit = options.limit ?? 25;
+  const normalized = normalizeExplorerQuery(query);
   const parameters = new URLSearchParams({
-    region: query.region,
-    station: query.station,
+    region: normalized.region,
+    station: normalized.station,
     limit: String(limit),
   });
-  if (query.from !== null) parameters.set("from", query.from);
-  if (query.to !== null) parameters.set("to", query.to);
-  if (query.number !== null) parameters.set("number", query.number);
+  if (normalized.from !== null) parameters.set("from", normalized.from);
+  if (normalized.to !== null) parameters.set("to", normalized.to);
+  if (normalized.number !== null) parameters.set("number", normalized.number);
+  if (normalized.value !== null) parameters.set("value", normalized.value);
+  if (normalized.match !== null) parameters.set("match", normalized.match);
+  if (normalized.prizeGroup !== null) parameters.set("prizeGroup", normalized.prizeGroup);
   if (options.cursor) parameters.set("cursor", options.cursor);
 
   const response = await fetcher(`/api/v2/results?${parameters}`, { signal: options.signal });
@@ -167,14 +202,19 @@ export function compatibilityExplorerItems(
   query: ExplorerQuery,
   limit = 25,
 ): LotteryDraw[] {
+  const normalized = normalizeExplorerQuery(query);
   return data.draws
-    .filter((draw) => draw.stationCode === query.station)
-    .filter((draw) => query.from === null || draw.date >= query.from)
-    .filter((draw) => query.to === null || draw.date <= query.to)
-    .filter((draw) => query.number === null || draw.numbers.includes(query.number))
+    .filter((draw) => draw.stationCode === normalized.station)
+    .filter((draw) => normalized.from === null || draw.date >= normalized.from)
+    .filter((draw) => normalized.to === null || draw.date <= normalized.to)
+    .filter((draw) => lotteryDrawMatchesPrizeFilter(draw, normalized))
     .sort((left, right) => right.date.localeCompare(left.date))
     .slice(0, limit);
 }
+
+// 365-draw max analysis window plus the 90-draw evaluation limit; must match
+// DEFAULT_RECENT_DRAWS_PER_STATION in scripts/export_serving_data.py.
+const STATION_HISTORY_TARGET_DRAWS = 455;
 
 function stationDraws(data: LotteryDashboardData, station: string): LotteryDraw[] {
   return data.draws
@@ -217,9 +257,11 @@ export async function fetchStationHistory(
       });
       newest.push(...page.items);
       cursor = page.page.nextCursor;
-    } while (cursor && newest.length < 455);
+    } while (cursor && newest.length < STATION_HISTORY_TARGET_DRAWS);
     return {
-      draws: newest.slice(0, 455).sort((left, right) => left.date.localeCompare(right.date)),
+      draws: newest
+        .slice(0, STATION_HISTORY_TARGET_DRAWS)
+        .sort((left, right) => left.date.localeCompare(right.date)),
       station: requestedStation,
       fallback: null,
     };

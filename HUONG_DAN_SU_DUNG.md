@@ -263,11 +263,17 @@ npm ci
 npm run dev
 ```
 
-Mở URL được in trong terminal, thường là `http://localhost:3000`. Dashboard có đủ XSMB/XSMN/XSMT, Explorer lịch sử
-lọc theo đài/ngày/số, heatmap `00`–`99`, ba heuristic và Benchmark Integrity v1 walk-forward. Explorer tự chạy deep
-link hợp lệ một lần sau khi metadata đài sẵn sàng; **Tải thêm kết quả** nối trang, loại trùng và giữ thứ tự ngày giảm
-dần. Bộ lọc ngày/số đang sửa nháp không làm thay đổi URL hoặc tiếp tục cursor của query cũ trước khi bấm
-**Tra kết quả**.
+Mở URL được in trong terminal, thường là `http://localhost:3000`. Dashboard có đủ XSMB/XSMN/XSMT, toggle kết quả mới
+nhất giữa lô tô 2 số và bảng giải đầy đủ, heatmap `00`–`99`, ba heuristic và Benchmark Integrity v1 walk-forward.
+Explorer tìm exact hoặc suffix 1–6 chữ số theo đài/ngày/nhóm giải và giữ nguyên zero đầu; `005113` không bị đổi thành
+`5113`. Explorer tự chạy deep link hợp lệ một lần sau khi metadata đài sẵn sàng; **Tải thêm kết quả** nối trang, loại
+trùng và giữ thứ tự ngày giảm dần. Bộ lọc đang sửa nháp không làm thay đổi URL hoặc tiếp tục cursor của query cũ trước
+khi bấm **Tra kết quả**. Click một model pick, ô heatmap hoặc pattern trong Prize Lab sẽ mở đúng các kỳ gốc trong cửa
+sổ phân tích.
+
+Prize Lab phân tích riêng giải đặc biệt và từng nhóm giải theo official width: số quan sát/phân biệt, tỷ lệ zero đầu,
+chẵn/lẻ, phân phối từng vị trí, tổng chữ số, đuôi 3 số và exact repeats. Báo cáo Prize Lab JSON mang theo dataset
+version; toàn bộ chỉ là thống kê mô tả, không phải dự báo.
 
 Mỗi model chỉ chạy trên một đài và chỉ train bằng các kỳ trước kỳ đánh giá. Benchmark ghi dataset version, region,
 station, model, window, training/evaluation range, hit rate, deterministic bootstrap 95% CI và fingerprint. Báo cáo

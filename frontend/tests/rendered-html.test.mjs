@@ -53,6 +53,18 @@ test("ships all three serving-schema demo datasets and removes the starter previ
   assert.match(page, /backtest/i);
   assert.match(page, /RESULT EXPLORER/);
   assert.match(dashboardData, /\/api\/v2\/results/);
+  assert.match(page, /Lô tô 2 số/);
+  assert.match(page, /Kết quả đầy đủ/);
+  assert.match(page, /orderedPrizeEntries\(latestDraw\.prizes\)/);
+  assert.match(page, /aria-pressed=\{latestResultView === "full"\}/);
+  assert.match(page, /PRIZE LAB · FULL NUMBER/);
+  assert.match(page, /Tải Prize Lab JSON/);
+  assert.match(page, /reportGeneratedAt/);
+  assert.match(page, /observedDrawCount/);
+  assert.match(page, /openExplorerEvidence\(number\)/);
+  assert.match(page, /Khớp đuôi/);
+  assert.match(page, /Số đầy đủ/);
+  assert.match(page, /Nhóm giải/);
   assert.match(page, /Tra kết quả/);
   assert.match(page, /Tải thêm kết quả/);
   assert.match(page, /Không tìm thấy kỳ quay phù hợp/);

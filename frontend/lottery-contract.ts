@@ -1,6 +1,20 @@
 export const LOTTERY_REGIONS = ["xsmb", "xsmn", "xsmt"] as const;
+export const LOTTERY_PRIZE_GROUPS = [
+  "special",
+  "prize1",
+  "prize2",
+  "prize3",
+  "prize4",
+  "prize5",
+  "prize6",
+  "prize7",
+  "prize8",
+] as const;
+export const LOTTERY_PRIZE_MATCHES = ["exact", "suffix"] as const;
 
 export type LotteryRegion = (typeof LOTTERY_REGIONS)[number];
+export type LotteryPrizeGroup = (typeof LOTTERY_PRIZE_GROUPS)[number];
+export type LotteryPrizeMatch = (typeof LOTTERY_PRIZE_MATCHES)[number];
 export type FrequencyMap = Record<string, number>;
 
 export type LotteryStation = {
@@ -91,6 +105,9 @@ export type LotteryV2ResultsPage = {
     from: string | null;
     to: string | null;
     number: string | null;
+    value: string | null;
+    match: LotteryPrizeMatch | null;
+    prizeGroup: LotteryPrizeGroup | null;
   };
   page: {
     limit: number;
@@ -122,9 +139,33 @@ const REGION_NAMES: Record<LotteryRegion, string> = {
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const NUMBER_PATTERN = /^\d{2}$/;
-const DIGITS_PATTERN = /^\d{2,6}$/;
+const PRIZE_VALUE_PATTERN = /^[0-9]{1,6}$/;
 const STATION_CODE_PATTERN = /^[A-Za-z0-9]{2,8}$/;
 const SAFE_KEY_PART_PATTERN = /^[A-Za-z0-9._-]+$/;
+const XSMB_PRIZE_SPECS = {
+  special: { count: 1, width: 5 },
+  prize1: { count: 1, width: 5 },
+  prize2: { count: 2, width: 5 },
+  prize3: { count: 6, width: 5 },
+  prize4: { count: 4, width: 4 },
+  prize5: { count: 6, width: 4 },
+  prize6: { count: 3, width: 3 },
+  prize7: { count: 4, width: 2 },
+} as const;
+const SOUTHERN_PRIZE_SPECS = {
+  prize8: { count: 1, width: 2 },
+  prize7: { count: 1, width: 3 },
+  prize6: { count: 3, width: 4 },
+  prize5: { count: 1, width: 4 },
+  prize4: { count: 7, width: 5 },
+  prize3: { count: 2, width: 5 },
+  prize2: { count: 1, width: 5 },
+  prize1: { count: 1, width: 5 },
+  special: { count: 1, width: 6 },
+} as const;
+
+type PrizeSpec = { count: number; width: number };
+type RegionPrizeSpecs = Partial<Record<LotteryPrizeGroup, PrizeSpec>>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -157,27 +198,72 @@ function isFrequencyMap(value: unknown): value is FrequencyMap {
     .every((number) => isNonNegativeInteger(value[number]));
 }
 
+function prizeSpecs(region: LotteryRegion): RegionPrizeSpecs {
+  return region === "xsmb" ? XSMB_PRIZE_SPECS : SOUTHERN_PRIZE_SPECS;
+}
+
+export function isLotteryPrizeGroup(value: unknown): value is LotteryPrizeGroup {
+  return typeof value === "string" && LOTTERY_PRIZE_GROUPS.includes(value as LotteryPrizeGroup);
+}
+
+export function isLotteryPrizeMatch(value: unknown): value is LotteryPrizeMatch {
+  return typeof value === "string" && LOTTERY_PRIZE_MATCHES.includes(value as LotteryPrizeMatch);
+}
+
+export function lotteryPrizeGroupSupported(region: LotteryRegion, group: LotteryPrizeGroup): boolean {
+  return Object.hasOwn(prizeSpecs(region), group);
+}
+
+function isPrizeGroups(
+  value: unknown,
+  region: LotteryRegion,
+): value is Record<LotteryPrizeGroup, string[]> {
+  if (!isRecord(value)) return false;
+  const specs = prizeSpecs(region);
+  const expectedGroups = Object.keys(specs) as LotteryPrizeGroup[];
+  if (Object.keys(value).length !== expectedGroups.length ||
+    !Object.keys(value).every((group) => isLotteryPrizeGroup(group) && Object.hasOwn(specs, group))) return false;
+  return expectedGroups.every((group) => {
+    const spec = specs[group];
+    const prizes = value[group];
+    if (!spec || !Array.isArray(prizes) || prizes.length !== spec.count) return false;
+    const pattern = new RegExp(`^[0-9]{${spec.width}}$`);
+    return prizes.every((prize) => typeof prize === "string" && pattern.test(prize));
+  });
+}
+
+export function lotteryDrawMatchesPrizeFilter(
+  draw: LotteryDraw,
+  filter: Pick<LotteryV2ResultsPage["query"], "number" | "value" | "match" | "prizeGroup">,
+): boolean {
+  if (filter.number !== null) return draw.numbers.includes(filter.number);
+  if (filter.value === null) return true;
+  const groups = filter.prizeGroup === null
+    ? Object.values(draw.prizes)
+    : [draw.prizes[filter.prizeGroup] ?? []];
+  const candidates = groups.flat();
+  return filter.match === "suffix"
+    ? candidates.some((prize) => prize.endsWith(filter.value as string))
+    : candidates.includes(filter.value);
+}
+
 function isLotteryDraw(value: unknown, region: LotteryRegion, stationCodes: Set<string>): value is LotteryDraw {
   if (!isRecord(value) || !isIsoDate(value.date)) return false;
   if (typeof value.stationCode !== "string" || !stationCodes.has(value.stationCode)) return false;
-  if (!isNonEmptyString(value.stationName) || typeof value.specialPrize !== "string" || !DIGITS_PATTERN.test(value.specialPrize)) return false;
+  if (!isNonEmptyString(value.stationName) || typeof value.specialPrize !== "string") return false;
   if (typeof value.specialTail !== "string" || !NUMBER_PATTERN.test(value.specialTail) || !value.specialPrize.endsWith(value.specialTail)) return false;
   const expectedResults = region === "xsmb" ? 27 : 18;
   if (!Array.isArray(value.numbers) || value.numbers.length !== expectedResults) return false;
   if (!value.numbers.every((number) => typeof number === "string" && NUMBER_PATTERN.test(number))) return false;
   const numbers = value.numbers as string[];
-  if (!isRecord(value.prizes)) return false;
-  const validPrizes = Object.values(value.prizes).every(
-    (prizes) => Array.isArray(prizes) && prizes.every((prize) => typeof prize === "string" && /^\d{1,6}$/.test(prize)),
-  );
-  if (!validPrizes) return false;
+  if (!isPrizeGroups(value.prizes, region)) return false;
   const prizeNumbers = Object.values(value.prizes)
-    .flatMap((prizes) => prizes as string[])
-    .map((prize) => prize.slice(-2).padStart(2, "0"));
+    .flat()
+    .map((prize) => prize.slice(-2));
   const sortedNumbers = [...numbers].sort();
   return prizeNumbers.length === expectedResults &&
     [...prizeNumbers].sort().every((number, index) => number === sortedNumbers[index]) &&
-    Array.isArray(value.prizes.special) && value.prizes.special.length === 1 &&
+    numbers[0] === value.specialTail &&
     value.prizes.special[0] === value.specialPrize;
 }
 
@@ -320,7 +406,14 @@ export function isLotteryV2ResultsPage(
     (query.from !== null && !isIsoDate(query.from)) ||
     (query.to !== null && !isIsoDate(query.to)) ||
     (query.number !== null && (typeof query.number !== "string" || !NUMBER_PATTERN.test(query.number))) ||
+    (query.value !== null && (typeof query.value !== "string" || !PRIZE_VALUE_PATTERN.test(query.value))) ||
+    (query.match !== null && !isLotteryPrizeMatch(query.match)) ||
+    (query.prizeGroup !== null &&
+      (!isLotteryPrizeGroup(query.prizeGroup) || !lotteryPrizeGroupSupported(expectedRegion, query.prizeGroup))) ||
     (typeof query.from === "string" && typeof query.to === "string" && query.to < query.from)) return false;
+  if ((query.number !== null && (query.value !== null || query.match !== null || query.prizeGroup !== null)) ||
+    (query.value === null && (query.match !== null || query.prizeGroup !== null)) ||
+    (query.value !== null && !isLotteryPrizeMatch(query.match))) return false;
   const page = value.page;
   if (!isRecord(page) || !isNonNegativeInteger(page.limit) || page.limit < 1 || page.limit > 100 ||
     !isNonNegativeInteger(page.returned) || page.returned > page.limit ||
@@ -334,7 +427,7 @@ export function isLotteryV2ResultsPage(
     (index === 0 || items[index - 1].date > draw.date) &&
     (normalizedQuery.from === null || draw.date >= normalizedQuery.from) &&
     (normalizedQuery.to === null || draw.date <= normalizedQuery.to) &&
-    (normalizedQuery.number === null || draw.numbers.includes(normalizedQuery.number))
+    lotteryDrawMatchesPrizeFilter(draw, normalizedQuery)
   );
 }
 
@@ -368,5 +461,21 @@ export function normalizeLotteryV2ResultsPage(
   value: unknown,
   expectedRegion: LotteryRegion,
 ): LotteryV2ResultsPage | null {
-  return isLotteryV2ResultsPage(value, expectedRegion) ? value : null;
+  let candidate = value;
+  if (isRecord(value) && isRecord(value.query)) {
+    const query = value.query;
+    const legacyFullPrizeFields = ["value", "match", "prizeGroup"] as const;
+    if (legacyFullPrizeFields.every((field) => !Object.hasOwn(query, field))) {
+      candidate = {
+        ...value,
+        query: {
+          ...query,
+          value: null,
+          match: null,
+          prizeGroup: null,
+        },
+      };
+    }
+  }
+  return isLotteryV2ResultsPage(candidate, expectedRegion) ? candidate : null;
 }

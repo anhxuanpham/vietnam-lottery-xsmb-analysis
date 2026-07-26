@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 const TITLE = "Lôtô Lab — Vietnam Lottery Analytics";
-const DESCRIPTION = "Dashboard mô tả dữ liệu XSMB/XSMN/XSMT với heatmap, model lab và backtest minh bạch.";
+const DESCRIPTION = "Dashboard XSMB/XSMN/XSMT với bảng giải đầy đủ, Prize Lab, heatmap và backtest minh bạch.";
 const FALLBACK_ORIGIN = "https://loto-lab-vietnam.nmt17092006.chatgpt.site";
 
 function requestOrigin(requestHeaders: Headers): URL {
@@ -43,16 +43,16 @@ export async function generateMetadata(): Promise<Metadata> {
     description: DESCRIPTION,
     openGraph: {
       title: TITLE,
-      description: "Khám phá dữ liệu XSMB, XSMN và XSMT bằng lịch sử có phiên bản và backtest không nhìn trước.",
+      description: "Tra số đầy đủ, truy ngược kỳ quay và khám phá Prize Lab trên lịch sử ba miền có phiên bản.",
       type: "website",
       locale: "vi_VN",
       url: origin,
-      images: [{ url: socialImage, width: 1735, height: 907, alt: "Lôtô Lab analytics data grid" }],
+      images: [{ url: socialImage, width: 1731, height: 909, alt: "Lôtô Lab Prize Lab analytics data grid" }],
     },
     twitter: {
       card: "summary_large_image",
       title: TITLE,
-      description: "Dashboard mô tả dữ liệu xổ số ba miền với Explorer và backtest minh bạch.",
+      description: "Dashboard dữ liệu xổ số ba miền với Full Result Explorer, Prize Lab và backtest minh bạch.",
       images: [socialImage],
     },
   };

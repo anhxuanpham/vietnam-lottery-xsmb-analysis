@@ -16,15 +16,24 @@ Nếu bucket serving local đang trống, Worker tự đọc ba snapshot JSON đ
 
 ## Dashboard đang hiển thị gì?
 
-- Kết quả mới nhất cho cả ba miền và bộ lọc theo đài ở XSMN/XSMT.
+- Kết quả mới nhất cho cả ba miền với toggle giữa lô tô 2 số và bảng giải đầy đủ, giữ nguyên số 0 đầu.
 - Heatmap tần suất `00`–`99` theo 30/90/180/365 kỳ.
 - Model tần suất, khoảng vắng và model cân bằng 60/40.
 - Benchmark Integrity v1 walk-forward 90 kỳ, chạy độc lập trên từng đài và chỉ train bằng dữ liệu đứng trước kỳ đánh giá.
 - Tín hiệu nóng/lạnh và đà 7 kỳ so với 30 kỳ.
 - Trạng thái nguồn R2/demo, dataset version, health thật của ba miền và trạng thái watchdog đã được lược bỏ định danh incident.
-- Explorer lịch sử theo miền, đài, khoảng ngày và số `00`–`99`; deep link hợp lệ tự tra một lần sau khi metadata sẵn sàng.
-  Bộ lọc ngày/số chỉ được ghi vào URL khi bấm **Tra kết quả**; sửa nháp sẽ hủy cursor cũ. **Tải thêm kết quả** nối
-  tiếp, loại trùng và giữ thứ tự ngày giảm dần thay vì thay thế trang trước.
+- Explorer lịch sử theo miền, đài và khoảng ngày; tìm exact hoặc suffix 1–6 chữ số, có thể giới hạn theo nhóm giải.
+  Chuỗi tìm kiếm không bị ép sang số nên `005113` khác `5113`. Deep link hợp lệ tự tra một lần sau khi metadata sẵn
+  sàng. Bộ lọc chỉ được ghi vào URL khi bấm **Tra kết quả**; sửa nháp sẽ hủy cursor cũ. **Tải thêm kết quả** nối tiếp,
+  loại trùng và giữ thứ tự ngày giảm dần thay vì thay thế trang trước.
+- Model picks và từng ô heatmap mở Result Explorer trong đúng cửa sổ phân tích để truy ngược các kỳ quay gốc.
+- Prize Lab mô tả giải đặc biệt và từng nhóm giải: official width, số quan sát/phân biệt, zero đầu, chẵn/lẻ, phân phối
+  từng vị trí, tổng chữ số, đuôi 3 số và exact repeats. Báo cáo JSON mang theo dataset version và disclosure.
+
+Prize Lab `prize-descriptive-v2` khai thác sâu hơn số giải đầy đủ (5 số XSMB, 6 số XSMN/XSMT): chạm 0–9 đếm tỷ lệ kỳ mà
+mỗi chữ số có mặt ít nhất một lần trong giá trị, đầu 3 số thống kê ba chữ số đầu (chỉ tính khi độ rộng chính thức ≥ 4 để
+không trùng với đuôi 3 số), và độ trễ đuôi 3 số của giải đặc biệt ghi lần về gần nhất cùng số kỳ đã trôi qua kể từ đó.
+Tất cả vẫn là thống kê mô tả trên một đài, một cửa sổ; không phải dự báo.
 
 Benchmark gắn dataset/đài/model/window, training range, evaluation range và fingerprint xác định. Mỗi model hiển thị
 coverage, hit rate, bootstrap 95% CI xác định và lift so với baseline `topK / 100`; báo cáo JSON tải xuống giữ cùng
@@ -55,16 +64,19 @@ sử rồi export JSON gọn. Toàn bộ đường dẫn/release shard được 
 metadata v2 chỉ được publish cuối cùng khi không có shard lỗi. `Backup Published Lottery Releases` tiếp tục tự chạy
 sau khi Dashboard publish thành công. Frontend không bao giờ chứa R2 key.
 
-API đọc không cần application token sau khi người gọi đã qua lớp access owner-only của Sites:
+API đọc không cần application token; Sites đang chịu trách nhiệm lớp truy cập của deployment:
 
 ```text
 GET /api/health/lottery
 GET /api/ops/lottery
 GET /api/v2/lottery?region=xsmn
 GET /api/v2/results?region=xsmn&station=AG&from=2020-01-01&to=2026-07-21&number=63&limit=25
+GET /api/v2/results?region=xsmn&station=TN&value=005113&match=exact&prizeGroup=special&limit=25
 ```
 
-Results API trả tối đa 100 dòng/lần, cursor gắn với release/filter và bị từ chối khi stale. Worker cron chạy mỗi 15
+`number=63` là bộ lọc tương thích Loto 2D cũ. API mới dùng `value`, `match=exact|suffix` và `prizeGroup`; không cho trộn
+hai kiểu filter. Results API trả tối đa 100 dòng/lần, cursor gắn với release và toàn bộ filter nên bị từ chối khi stale
+hoặc khi đổi query. Worker cron chạy mỗi 15
 phút trong cửa sổ tối: warning từ 20:00, critical từ 20:30, có dedupe/escalation/recovery và ledger R2. Đặt runtime
 secret `ALERT_WEBHOOK_URL` (HTTPS) nếu muốn nhận alert; bỏ trống thì health/incident vẫn được ghi nhưng delivery tắt.
 `/api/ops/lottery` chỉ trả trạng thái, target, thời điểm quan sát, severity và cờ incident; không trả incident ID,

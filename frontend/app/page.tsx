@@ -1,12 +1,12 @@
 "use client";
 
 import {
+  memo,
   useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
 } from "react";
 import {
   ANALYTICS_MODEL_VERSION,
@@ -43,8 +43,8 @@ import {
   failExplorerRequest,
   normalizeExplorerQuery,
   type ExplorerQuery,
+  type ExplorerState,
 } from "@/explorer-state";
-import { heatCellColors } from "@/heat-color";
 import {
   fetchLotteryOperations,
   type LotteryOperationsSnapshot,
@@ -69,6 +69,19 @@ import {
   type LotteryPrizeMatch,
   type LotteryRegion,
 } from "@/lottery-contract";
+import { ExplorerResultList } from "./components/explorer-result-list";
+import {
+  PRIZE_NAMES,
+  downloadJson,
+  formatDate,
+  formatTimestamp,
+  orderedPrizeEntries,
+  percentFormatter,
+} from "./components/format";
+import { LotoHeatmap } from "./components/loto-heatmap";
+import { MetricsBar } from "./components/metrics-bar";
+import { PrizeLab } from "./components/prize-lab";
+import { SignalStack } from "./components/signal-stack";
 
 type ModelResult = {
   kind: ModelKind;
@@ -80,60 +93,11 @@ type ModelResult = {
 };
 
 const WINDOW_OPTIONS = [30, 90, 180, 365] as const;
-const numberFormatter = new Intl.NumberFormat("vi-VN");
-const percentFormatter = new Intl.NumberFormat("vi-VN", {
-  style: "percent",
-  minimumFractionDigits: 1,
-  maximumFractionDigits: 1,
-});
-
-const PRIZE_NAMES: Record<string, string> = {
-  special: "Đặc biệt",
-  prize1: "Giải nhất",
-  prize2: "Giải nhì",
-  prize3: "Giải ba",
-  prize4: "Giải tư",
-  prize5: "Giải năm",
-  prize6: "Giải sáu",
-  prize7: "Giải bảy",
-  prize8: "Giải tám",
-  // Preserve compatibility with older serving payloads.
-  first: "Giải nhất",
-  second: "Giải nhì",
-  third: "Giải ba",
-  fourth: "Giải tư",
-  fifth: "Giải năm",
-  sixth: "Giải sáu",
-  seventh: "Giải bảy",
-  eighth: "Giải tám",
-};
-
-const dateFormatter = new Intl.DateTimeFormat("vi-VN", {
-  day: "2-digit",
-  month: "2-digit",
-  year: "numeric",
-});
-const timestampFormatter = new Intl.DateTimeFormat("vi-VN", {
-  day: "2-digit",
-  month: "2-digit",
-  year: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-});
 const runTimeFormatter = new Intl.DateTimeFormat("vi-VN", {
   hour: "2-digit",
   minute: "2-digit",
   second: "2-digit",
 });
-
-function formatDate(value: string) {
-  return dateFormatter.format(new Date(`${value}T00:00:00+07:00`));
-}
-
-function formatTimestamp(value: string | null | undefined) {
-  if (!value) return "Chưa có bằng chứng chạy";
-  return timestampFormatter.format(new Date(value));
-}
 
 function DashboardLoading() {
   return (
@@ -172,40 +136,514 @@ function initialExplorerDeepLinkError(region: LotteryRegion): string {
   return "";
 }
 
-function downloadJson(filename: string, payload: unknown) {
-  const url = URL.createObjectURL(
-    new Blob([`${JSON.stringify(payload, null, 2)}\n`], { type: "application/json" }),
+type LatestResultView = "tails" | "full";
+
+type LatestResultCardProps = {
+  latestDraw: LotteryDraw;
+  latestResultView: LatestResultView;
+  onViewChange: (view: LatestResultView) => void;
+};
+
+const LatestResultCard = memo(function LatestResultCard({
+  latestDraw,
+  latestResultView,
+  onViewChange,
+}: LatestResultCardProps) {
+  return (
+    <div className="latest-card">
+      <div className="latest-card-head">
+        <span>Kết quả gần nhất</span>
+        <strong>{formatDate(latestDraw.date)}</strong>
+      </div>
+      <div className="latest-view-toggle" role="group" aria-label="Chế độ hiển thị kết quả gần nhất">
+        <button
+          type="button"
+          aria-controls="latest-result-panel"
+          aria-pressed={latestResultView === "tails"}
+          onClick={() => onViewChange("tails")}
+        >
+          Lô tô 2 số
+        </button>
+        <button
+          type="button"
+          aria-controls="latest-result-panel"
+          aria-pressed={latestResultView === "full"}
+          onClick={() => onViewChange("full")}
+        >
+          Kết quả đầy đủ
+        </button>
+      </div>
+      <div className="latest-station">{latestDraw.stationName}</div>
+      <div className="latest-result-body" id="latest-result-panel">
+        {latestResultView === "tails" ? (
+          <>
+            <div className="special-result">
+              <small>Đuôi giải đặc biệt</small>
+              <strong>{latestDraw.specialTail}</strong>
+            </div>
+            <div className="latest-grid" aria-label={`${latestDraw.numbers.length} kết quả loto gần nhất`}>
+              {latestDraw.numbers.map((number, index) => (
+                <span className={index === 0 ? "is-special" : ""} key={`${number}-${index}`}>
+                  {number}
+                </span>
+              ))}
+            </div>
+            <p>{latestDraw.numbers.length} kết quả · giữ nguyên số 0 ở đầu</p>
+          </>
+        ) : (
+          <>
+            <div
+              className="latest-prize-table"
+              role="table"
+              aria-label={`Kết quả đầy đủ ${latestDraw.stationName} ngày ${formatDate(latestDraw.date)}`}
+            >
+              {orderedPrizeEntries(latestDraw.prizes).map(([group, prizes]) => (
+                <div
+                  className={group === "special" ? "latest-prize-row special" : "latest-prize-row"}
+                  role="row"
+                  key={group}
+                >
+                  <span role="rowheader">{PRIZE_NAMES[group] ?? group}</span>
+                  <div role="cell">
+                    {prizes.map((prize, index) => (
+                      <strong key={`${prize}-${index}`}>{prize}</strong>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p>Số giải đầy đủ · giữ nguyên số 0 ở đầu</p>
+          </>
+        )}
+      </div>
+    </div>
   );
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.hidden = true;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+});
+
+type ResultExplorerProps = {
+  stations: DashboardMetadata["stations"];
+  selectedStation: string;
+  explorerFrom: string;
+  explorerTo: string;
+  explorerValue: string;
+  explorerMatch: LotteryPrizeMatch;
+  explorerPrizeGroup: LotteryPrizeGroup | "";
+  explorerPrizeGroups: LotteryPrizeGroup[];
+  explorerDeepLinkError: string;
+  explorerState: ExplorerState;
+  chooseStation: (station: string) => void;
+  resetExplorer: () => void;
+  runExplorer: (append?: boolean) => Promise<void>;
+  setExplorerFrom: (value: string) => void;
+  setExplorerTo: (value: string) => void;
+  setExplorerValue: (value: string) => void;
+  setExplorerMatch: (value: LotteryPrizeMatch) => void;
+  setExplorerPrizeGroup: (value: LotteryPrizeGroup | "") => void;
+};
+
+function ResultExplorer({
+  stations,
+  selectedStation,
+  explorerFrom,
+  explorerTo,
+  explorerValue,
+  explorerMatch,
+  explorerPrizeGroup,
+  explorerPrizeGroups,
+  explorerDeepLinkError,
+  explorerState,
+  chooseStation,
+  resetExplorer,
+  runExplorer,
+  setExplorerFrom,
+  setExplorerTo,
+  setExplorerValue,
+  setExplorerMatch,
+  setExplorerPrizeGroup,
+}: ResultExplorerProps) {
+  return (
+    <section className="result-explorer" id="explorer">
+      <div className="section-heading">
+        <div><p className="kicker">RESULT EXPLORER</p><h2>Tra cứu từng kỳ quay</h2></div>
+        <p>
+          Tìm theo số đầy đủ hoặc đuôi 1–6 chữ số, thu hẹp đúng nhóm giải và giữ nguyên mọi số 0 ở đầu.
+        </p>
+      </div>
+      <form
+        className="explorer-controls"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void runExplorer();
+        }}
+      >
+        <label>
+          Đài
+          <select value={selectedStation} onChange={(event) => chooseStation(event.target.value)}>
+            {stations.map((station) => (
+              <option key={station.code} value={station.code}>{station.name}</option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Từ ngày
+          <input
+            type="date"
+            value={explorerFrom}
+            onChange={(event) => {
+              resetExplorer();
+              setExplorerFrom(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Đến ngày
+          <input
+            type="date"
+            value={explorerTo}
+            onChange={(event) => {
+              resetExplorer();
+              setExplorerTo(event.target.value);
+            }}
+          />
+        </label>
+        <label>
+          Cách khớp
+          <select
+            value={explorerMatch}
+            onChange={(event) => {
+              resetExplorer();
+              setExplorerMatch(event.target.value as LotteryPrizeMatch);
+            }}
+          >
+            <option value="suffix">Khớp đuôi</option>
+            <option value="exact">Số đầy đủ</option>
+          </select>
+        </label>
+        <label>
+          {explorerMatch === "suffix" ? "Đuôi cần tìm" : "Số cần tìm"}
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]{1,6}"
+            maxLength={6}
+            placeholder={explorerMatch === "suffix" ? "VD: 13 hoặc 113" : "VD: 005113"}
+            value={explorerValue}
+            onChange={(event) => {
+              resetExplorer();
+              setExplorerValue(event.target.value.replace(/\D/g, "").slice(0, 6));
+            }}
+          />
+        </label>
+        <label>
+          Nhóm giải
+          <select
+            value={explorerPrizeGroup}
+            onChange={(event) => {
+              resetExplorer();
+              setExplorerPrizeGroup(event.target.value as LotteryPrizeGroup | "");
+            }}
+          >
+            <option value="">Tất cả giải</option>
+            {explorerPrizeGroups.map((group) => (
+              <option key={group} value={group}>{PRIZE_NAMES[group] ?? group}</option>
+            ))}
+          </select>
+        </label>
+        <button type="submit" disabled={explorerState.status === "loading"}>
+          {explorerState.status === "loading" && !explorerState.appending ? "Đang tra…" : "Tra kết quả"}
+        </button>
+      </form>
+      {(explorerDeepLinkError || (explorerState.status === "error" && explorerState.error)) && (
+        <p className="explorer-message error" role="alert">
+          {explorerDeepLinkError || explorerState.error}
+        </p>
+      )}
+      {explorerState.status === "idle" && !explorerDeepLinkError && (
+        <p className="explorer-message">Chọn bộ lọc rồi bấm “Tra kết quả”. Đặt hai ngày giống nhau để tra đúng một kỳ.</p>
+      )}
+      {explorerState.status === "loading" && explorerState.items.length === 0 && (
+        <p className="explorer-message" role="status">Đang tìm trong lịch sử đã publish…</p>
+      )}
+      {explorerState.status === "empty" && (
+        <p className="explorer-message" role="status">Không tìm thấy kỳ quay phù hợp với bộ lọc đã áp dụng.</p>
+      )}
+      <ExplorerResultList
+        items={explorerState.items}
+        appliedQuery={explorerState.appliedQuery}
+        busy={explorerState.status === "loading"}
+      />
+      {explorerState.cursor && explorerState.appliedQuery && (
+        <button
+          className="next-page"
+          type="button"
+          disabled={explorerState.status === "loading"}
+          onClick={() => void runExplorer(true)}
+        >
+          {explorerState.appending ? "Đang tải thêm…" : "Tải thêm kết quả →"}
+        </button>
+      )}
+    </section>
+  );
 }
 
-function prizeMatchesExplorerQuery(
-  prize: string,
-  group: string,
-  query: ExplorerQuery | null,
-): boolean {
-  if (query === null) return false;
-  const normalized = normalizeExplorerQuery(query);
-  if (normalized.number !== null) return prize.endsWith(normalized.number);
-  if (normalized.value === null) return false;
-  if (normalized.prizeGroup !== null && normalized.prizeGroup !== group) return false;
-  return normalized.match === "suffix"
-    ? prize.endsWith(normalized.value)
-    : prize === normalized.value;
-}
+type ModelLabProps = {
+  region: LotteryRegion;
+  stations: DashboardMetadata["stations"];
+  selectedStation: string;
+  selectedWindow: number;
+  activeWindow: number;
+  lastRun: string;
+  resultsPerDraw: number;
+  benchmarkAvailable: boolean;
+  requiredDraws: number;
+  availableDraws: number;
+  models: ModelResult[];
+  chooseRegion: (region: LotteryRegion) => void;
+  chooseStation: (station: string) => void;
+  onWindowChange: (value: number) => void;
+  runModels: () => void;
+  openExplorerEvidence: (value: string) => void;
+  downloadBenchmarkReport: () => void;
+};
 
-function orderedPrizeEntries(prizes: Record<string, string[]>): Array<[LotteryPrizeGroup, string[]]> {
-  return LOTTERY_PRIZE_GROUPS.flatMap((group) =>
-    Object.hasOwn(prizes, group) ? [[group, prizes[group]] as [LotteryPrizeGroup, string[]]] : []
+const ModelLab = memo(function ModelLab({
+  region,
+  stations,
+  selectedStation,
+  selectedWindow,
+  activeWindow,
+  lastRun,
+  resultsPerDraw,
+  benchmarkAvailable,
+  requiredDraws,
+  availableDraws,
+  models,
+  chooseRegion,
+  chooseStation,
+  onWindowChange,
+  runModels,
+  openExplorerEvidence,
+  downloadBenchmarkReport,
+}: ModelLabProps) {
+  return (
+    <section className="model-lab" id="models">
+      <div className="section-heading">
+        <div><p className="kicker">MODEL LAB</p><h2>Chạy thử các góc nhìn</h2></div>
+        <p>Coverage đo tỷ lệ {resultsPerDraw} kết quả thực tế nằm trong top 10 của model. Lift được so với baseline 10%.</p>
+      </div>
+
+      <div className="control-bar">
+        <div className="region-switch" aria-label="Chọn miền">
+          {LOTTERY_REGIONS.map((option) => (
+            <button
+              className={region === option ? "active" : ""}
+              key={option}
+              type="button"
+              onClick={() => chooseRegion(option)}
+              aria-pressed={region === option}
+            >
+              {option.toUpperCase()} <span>{region === option ? "Đang xem" : "Sẵn sàng"}</span>
+            </button>
+          ))}
+        </div>
+        {stations.length > 1 && (
+          <label>
+            Đài phân tích
+            <select value={selectedStation} onChange={(event) => chooseStation(event.target.value)}>
+              {stations.map((station) => (
+                <option key={station.code} value={station.code}>{station.name}</option>
+              ))}
+            </select>
+          </label>
+        )}
+        <label>
+          Cửa sổ phân tích
+          <select value={selectedWindow} onChange={(event) => onWindowChange(Number(event.target.value))}>
+            {WINDOW_OPTIONS.map((window) => <option key={window} value={window}>{window} kỳ gần nhất</option>)}
+          </select>
+        </label>
+        <button className="run-button" type="button" onClick={runModels}>Chạy mô hình <span>↗</span></button>
+        <small>Lần chạy: {lastRun}</small>
+      </div>
+
+      {benchmarkAvailable ? (
+        <div className="model-grid">
+          {models.map((model, index) => (
+            <article className="model-card" key={model.kind}>
+              <div className="model-index">0{index + 1}</div>
+              <p className="model-eyebrow">{model.eyebrow}</p>
+              <h3>{model.name}</h3>
+              <p className="model-description">{model.description}</p>
+              <div className="pick-list" aria-label={`Top 10 ${model.name}`}>
+                {model.picks.map((number, pickIndex) => (
+                  <button
+                    type="button"
+                    key={number}
+                    className={pickIndex < 3 ? "top-pick" : ""}
+                    onClick={() => openExplorerEvidence(number)}
+                    aria-label={`Tra các giải có đuôi ${number} trong ${activeWindow} kỳ`}
+                    title={`Mở bằng chứng gốc cho đuôi ${number}`}
+                  >
+                    {number}
+                  </button>
+                ))}
+              </div>
+              <div className="model-stats">
+                <div>
+                  <small>Coverage</small>
+                  <strong>{percentFormatter.format(model.benchmark.coverage)}</strong>
+                </div>
+                <div>
+                  <small>95% CI</small>
+                  <strong>
+                    {percentFormatter.format(model.benchmark.coverageConfidenceInterval.lower)}
+                    {" — "}
+                    {percentFormatter.format(model.benchmark.coverageConfidenceInterval.upper)}
+                  </strong>
+                </div>
+                <div>
+                  <small>Hit rate</small>
+                  <strong>{percentFormatter.format(model.benchmark.hitRate)}</strong>
+                </div>
+                <div>
+                  <small>Lift / baseline</small>
+                  <strong>{model.benchmark.lift.toFixed(2)}×</strong>
+                </div>
+              </div>
+              <p className="model-sample">
+                {model.benchmark.evaluationCount} kỳ · {formatDate(model.benchmark.evaluationRange.from)}
+                {" — "}
+                {formatDate(model.benchmark.evaluationRange.to)} · không nhìn trước
+              </p>
+              <code className="model-fingerprint">{model.benchmark.fingerprint}</code>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="model-empty-notice" role="status">
+          Chưa đủ lịch sử để backtest cửa sổ {activeWindow} kỳ: cần ít nhất{" "}
+          {requiredDraws} kỳ nhưng đài này mới có {availableDraws} kỳ.
+          Chọn cửa sổ nhỏ hơn rồi bấm “Chạy mô hình”; heatmap, nóng/lạnh và Prize Lab
+          vẫn dùng toàn bộ lịch sử hiện có.
+        </p>
+      )}
+      <div className="benchmark-actions">
+        <p className="model-warning">
+          <strong>{ANALYTICS_MODEL_VERSION}</strong> · baseline {percentFormatter.format(BASELINE_COVERAGE)}.
+          {" "}12 lựa chọn model/cửa sổ (3 × 4) là phân tích khám phá; chọn lặp lại có thể làm kết quả
+          trông tốt hơn thực tế. Đây là heuristic mô tả và backtest, không phải dự báo xác suất trúng
+          hay khuyến nghị đặt cược.
+        </p>
+        <button
+          className="benchmark-download"
+          type="button"
+          onClick={downloadBenchmarkReport}
+          disabled={!benchmarkAvailable}
+        >
+          Tải benchmark JSON
+        </button>
+      </div>
+    </section>
   );
-}
+});
+
+type DataHealthProps = {
+  operations: LotteryOperationsSnapshot | null;
+  operationsError: string;
+  region: LotteryRegion;
+  dataSource: string;
+  datasetVersion: string;
+  matchesManifestTarget: boolean;
+  stationCode: string;
+  latestDrawDate: string;
+};
+
+const DataHealth = memo(function DataHealth({
+  operations,
+  operationsError,
+  region,
+  dataSource,
+  datasetVersion,
+  matchesManifestTarget,
+  stationCode,
+  latestDrawDate,
+}: DataHealthProps) {
+  const regionalHealth = operations?.health.regions[region] ?? null;
+  const unhealthyRegions = operations
+    ? LOTTERY_REGIONS.filter((candidate) => !operations.health.regions[candidate].healthy)
+    : [];
+  const watchdogState = operations?.watchdog?.state ?? null;
+  const watchdogLabel = watchdogState?.status === "healthy"
+    ? "HEALTHY"
+    : watchdogState?.status === "warning"
+      ? "WARNING"
+      : watchdogState?.status === "critical"
+        ? "CRITICAL"
+        : watchdogState?.status === "pending"
+          ? "PENDING"
+          : "NO EVIDENCE";
+  const watchdogDot = watchdogState?.status === "healthy"
+    ? "good"
+    : watchdogState?.status === "warning" || watchdogState?.status === "critical"
+      ? "bad"
+      : "pending";
+  const lineageHealthy = dataSource === "r2" &&
+    matchesManifestTarget &&
+    (regionalHealth?.datasetVersion === null ||
+      regionalHealth?.datasetVersion === undefined ||
+      regionalHealth.datasetVersion === datasetVersion);
+
+  return (
+    <section className="data-health" id="health">
+      <div className="section-heading">
+        <div><p className="kicker">DATA HEALTH</p><h2>Biết dashboard đang đọc gì</h2></div>
+        <p>Dashboard chỉ đọc JSON gọn qua API Worker. Gold Parquet và credential không bao giờ được gửi xuống trình duyệt.</p>
+      </div>
+      <div className="health-grid">
+        <article>
+          <span className={`health-dot ${operations?.health.healthy ? "good" : operations ? "bad" : "pending"}`} />
+          <div>
+            <small>Serving health</small>
+            <strong>
+              {operations?.health.healthy
+                ? "3/3 miền đạt chuẩn"
+                : operations
+                  ? `Lỗi: ${unhealthyRegions.map((item) => item.toUpperCase()).join(", ")}`
+                  : operationsError || "Đang chờ health API"}
+            </strong>
+          </div>
+          <em>{operations ? `TARGET ${formatDate(operations.health.expectedTargetDate)}` : "UNAVAILABLE"}</em>
+        </article>
+        <article title={regionalHealth?.issues.join("; ") || undefined}>
+          <span className={`health-dot ${regionalHealth?.healthy ? "good" : regionalHealth ? "bad" : "pending"}`} />
+          <div>
+            <small>{region.toUpperCase()} mới nhất</small>
+            <strong>
+              {formatDate(regionalHealth?.latestDrawDate ?? latestDrawDate)}
+            </strong>
+          </div>
+          <em>{regionalHealth?.healthy ? "REGION OK" : regionalHealth ? "ISSUES" : "NO STATUS"}</em>
+        </article>
+        <article>
+          <span className={`health-dot ${watchdogDot}`} />
+          <div>
+            <small>Watchdog gần nhất</small>
+            <strong>{formatTimestamp(watchdogState?.lastObservedAt)}</strong>
+          </div>
+          <em>{watchdogLabel}</em>
+        </article>
+        <article>
+          <span className={`health-dot ${lineageHealthy ? "good" : dataSource === "r2" ? "bad" : "pending"}`} />
+          <div>
+            <small>Dataset lineage · {stationCode.toUpperCase()}</small>
+            <strong>{datasetVersion}</strong>
+          </div>
+          <em>{dataSource === "r2" ? (lineageHealthy ? "R2 SYNCED" : "R2 MISMATCH") : "DEMO"}</em>
+        </article>
+      </div>
+    </section>
+  );
+});
 
 export default function Home() {
   const [region, setRegion] = useState<LotteryRegion>(() => {
@@ -224,7 +662,7 @@ export default function Home() {
   const [selectedWindow, setSelectedWindow] = useState(90);
   const [activeWindow, setActiveWindow] = useState(90);
   const [lastRun, setLastRun] = useState("Chưa chạy");
-  const [latestResultView, setLatestResultView] = useState<"tails" | "full">("tails");
+  const [latestResultView, setLatestResultView] = useState<LatestResultView>("tails");
   const [reloadToken, setReloadToken] = useState(0);
   const [operations, setOperations] = useState<LotteryOperationsSnapshot | null>(null);
   const [operationsError, setOperationsError] = useState("");
@@ -437,25 +875,14 @@ export default function Home() {
     setExplorerState(INITIAL_EXPLORER_STATE);
   }, []);
 
-  const runExplorer = useCallback(async (
+  // Stable across explorer-input keystrokes so memoized sections that trigger
+  // evidence lookups do not re-render while the user types.
+  const executeExplorerQuery = useCallback(async (
+    query: ExplorerQuery,
     append = false,
-    overrideQuery: ExplorerQuery | null = null,
+    cursor: string | null = null,
   ) => {
     if (!data || !selectedStation) return;
-    const query: ExplorerQuery | null = append
-      ? explorerState.appliedQuery
-      : overrideQuery ?? {
-          region,
-          station: selectedStation,
-          from: explorerFrom || null,
-          to: explorerTo || null,
-          number: null,
-          value: explorerValue || null,
-          match: explorerValue ? explorerMatch : null,
-          prizeGroup: explorerValue && explorerPrizeGroup ? explorerPrizeGroup : null,
-        };
-    const cursor = append ? explorerState.cursor : null;
-    if (query === null || (append && cursor === null)) return;
     const validationError = explorerQueryError(query);
     if (validationError !== null) {
       const started = beginExplorerRequest(INITIAL_EXPLORER_STATE, query, false);
@@ -500,8 +927,30 @@ export default function Home() {
         explorerAbortController.current = null;
       }
     }
+  }, [data, fallbackData, selectedStation, servingMode]);
+
+  const runExplorer = useCallback(async (append = false) => {
+    if (!data || !selectedStation) return;
+    if (append) {
+      const query = explorerState.appliedQuery;
+      const cursor = explorerState.cursor;
+      if (query === null || cursor === null) return;
+      await executeExplorerQuery(query, true, cursor);
+      return;
+    }
+    await executeExplorerQuery({
+      region,
+      station: selectedStation,
+      from: explorerFrom || null,
+      to: explorerTo || null,
+      number: null,
+      value: explorerValue || null,
+      match: explorerValue ? explorerMatch : null,
+      prizeGroup: explorerValue && explorerPrizeGroup ? explorerPrizeGroup : null,
+    });
   }, [
     data,
+    executeExplorerQuery,
     explorerFrom,
     explorerMatch,
     explorerPrizeGroup,
@@ -509,11 +958,106 @@ export default function Home() {
     explorerState.cursor,
     explorerTo,
     explorerValue,
-    fallbackData,
     region,
     selectedStation,
-    servingMode,
   ]);
+
+  const openExplorerEvidence = useCallback((
+    value: string,
+    match: LotteryPrizeMatch = "suffix",
+    prizeGroup: LotteryPrizeGroup | "" = "",
+  ) => {
+    if (!analysis) return;
+    const query: ExplorerQuery = {
+      region,
+      station: selectedStation,
+      from: analysis.prizeLab?.dateRange.from ?? analysis.analysisDraws[0].date,
+      to: analysis.prizeLab?.dateRange.to ?? analysis.analysisDraws[analysis.analysisDraws.length - 1].date,
+      number: null,
+      value,
+      match,
+      prizeGroup: prizeGroup || null,
+    };
+    resetExplorer();
+    setExplorerFrom(query.from ?? "");
+    setExplorerTo(query.to ?? "");
+    setExplorerValue(value);
+    setExplorerMatch(match);
+    setExplorerPrizeGroup(prizeGroup);
+    window.requestAnimationFrame(() => {
+      document.getElementById("explorer")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    void executeExplorerQuery(query);
+  }, [analysis, executeExplorerQuery, region, resetExplorer, selectedStation]);
+
+  const chooseRegion = useCallback((nextRegion: LotteryRegion) => {
+    if (nextRegion === region) return;
+    resetExplorer();
+    requestedStation.current = "";
+    setExplorerFrom("");
+    setExplorerTo("");
+    setExplorerValue("");
+    setExplorerMatch("suffix");
+    setExplorerPrizeGroup("");
+    setSelectedStation("");
+    setData(null);
+    setFallbackData(null);
+    setDraws([]);
+    setError("");
+    setHistoryError("");
+    setRegion(nextRegion);
+  }, [region, resetExplorer]);
+
+  const chooseStation = useCallback((station: string) => {
+    resetExplorer();
+    requestedStation.current = station;
+    setSelectedStation(station);
+    setDraws([]);
+    setHistoryError("");
+  }, [resetExplorer]);
+
+  const runModels = useCallback(() => {
+    setActiveWindow(selectedWindow);
+    setLastRun(runTimeFormatter.format(new Date()));
+  }, [selectedWindow]);
+
+  const downloadBenchmarkReport = useCallback(() => {
+    if (!data || !analysis || !analysis.benchmarkAvailable) return;
+    const report = buildBenchmarkReport({
+      datasetVersion: data.manifest.datasetVersion,
+      region,
+      stationCode: analysis.station.code,
+      stationName: analysis.station.name,
+      selectedWindow: activeWindow,
+      modelKinds: MODEL_KINDS,
+      windows: WINDOW_OPTIONS,
+      benchmarks: analysis.models.map((model) => model.benchmark),
+    });
+    downloadJson(benchmarkReportFilename(report), report);
+  }, [activeWindow, analysis, data, region]);
+
+  const downloadPrizeLabReport = useCallback(() => {
+    const prizeLab = analysis?.prizeLab ?? null;
+    if (!data || !analysis || prizeLab === null) return;
+    downloadJson(
+      `prize-lab-${region}-${analysis.station.code}-${prizeLab.dateRange.to}.json`,
+      {
+        schemaVersion: 1,
+        reportType: "prize-lab",
+        analyticsVersion: PRIZE_ANALYTICS_VERSION,
+        reportGeneratedAt: new Date().toISOString(),
+        datasetGeneratedAt: data.generatedAt,
+        datasetVersion: data.manifest.datasetVersion,
+        region,
+        stationCode: analysis.station.code,
+        stationName: analysis.station.name,
+        requestedWindow: activeWindow,
+        observedDrawCount: prizeLab.drawCount,
+        disclosure: "Thống kê mô tả dữ liệu lịch sử; không dự báo xác suất trúng.",
+        analysis: prizeLab,
+      },
+    );
+  }, [activeWindow, analysis, data, region]);
 
   useEffect(() => {
     if (!data || !selectedStation || draws.length === 0 || !explorerDeepLinkPending.current) return;
@@ -548,161 +1092,7 @@ export default function Home() {
   const explorerPrizeGroups = LOTTERY_PRIZE_GROUPS.filter((group) =>
     lotteryPrizeGroupSupported(region, group)
   );
-  const appliedExplorerQuery = explorerState.appliedQuery === null
-    ? null
-    : normalizeExplorerQuery(explorerState.appliedQuery);
   const prizeLab = analysis.prizeLab;
-  const topSpecialTails = prizeLab === null
-    ? []
-    : [...prizeLab.specialPrize.tail3Frequency]
-      .filter((item) => item.count > 1)
-      .sort((left, right) => right.count - left.count || left.tail3.localeCompare(right.tail3))
-      .slice(0, 8);
-  const topSpecialHeads = prizeLab === null
-    ? []
-    : [...prizeLab.specialPrize.head3Frequency]
-      .filter((item) => item.count > 1)
-      .sort((left, right) => right.count - left.count || left.head3.localeCompare(right.head3))
-      .slice(0, 8);
-  const specialTailRecency = new Map<string, number>(
-    prizeLab === null
-      ? []
-      : prizeLab.specialPrize.tail3Recency.map((item) => [item.tail3, item.drawsSinceLastSeen]),
-  );
-  const topSpecialDigitSums = prizeLab === null
-    ? []
-    : [...prizeLab.specialPrize.digitSumDistribution]
-      .sort((left, right) => right.count - left.count || left.digitSum - right.digitSum)
-      .slice(0, 6);
-  const specialPositionLeaders = prizeLab === null
-    ? []
-    : prizeLab.specialPrize.positionalDigitDistributions.map((distribution) => {
-      const maximum = Math.max(...distribution.digits.map((candidate) => candidate.count));
-      return {
-        position: distribution.positionFromLeft,
-        leaders: distribution.digits.filter((candidate) => candidate.count === maximum),
-      };
-    });
-
-  const regionalHealth = operations?.health.regions[region] ?? null;
-  const unhealthyRegions = operations
-    ? LOTTERY_REGIONS.filter((candidate) => !operations.health.regions[candidate].healthy)
-    : [];
-  const watchdogState = operations?.watchdog?.state ?? null;
-  const watchdogLabel = watchdogState?.status === "healthy"
-    ? "HEALTHY"
-    : watchdogState?.status === "warning"
-      ? "WARNING"
-      : watchdogState?.status === "critical"
-        ? "CRITICAL"
-        : watchdogState?.status === "pending"
-          ? "PENDING"
-          : "NO EVIDENCE";
-  const watchdogDot = watchdogState?.status === "healthy"
-    ? "good"
-    : watchdogState?.status === "warning" || watchdogState?.status === "critical"
-      ? "bad"
-      : "pending";
-  const lineageHealthy = dataSource === "r2" &&
-    data.freshness.matchesManifestTarget &&
-    (regionalHealth?.datasetVersion === null ||
-      regionalHealth?.datasetVersion === undefined ||
-      regionalHealth.datasetVersion === data.manifest.datasetVersion);
-
-  const runModels = () => {
-    setActiveWindow(selectedWindow);
-    setLastRun(runTimeFormatter.format(new Date()));
-  };
-
-  const downloadBenchmarkReport = () => {
-    if (!analysis.benchmarkAvailable) return;
-    const report = buildBenchmarkReport({
-      datasetVersion: data.manifest.datasetVersion,
-      region,
-      stationCode: analysis.station.code,
-      stationName: analysis.station.name,
-      selectedWindow: activeWindow,
-      modelKinds: MODEL_KINDS,
-      windows: WINDOW_OPTIONS,
-      benchmarks: analysis.models.map((model) => model.benchmark),
-    });
-    downloadJson(benchmarkReportFilename(report), report);
-  };
-
-  const downloadPrizeLabReport = () => {
-    if (prizeLab === null) return;
-    downloadJson(
-      `prize-lab-${region}-${analysis.station.code}-${prizeLab.dateRange.to}.json`,
-      {
-        schemaVersion: 1,
-        reportType: "prize-lab",
-        analyticsVersion: PRIZE_ANALYTICS_VERSION,
-        reportGeneratedAt: new Date().toISOString(),
-        datasetGeneratedAt: data.generatedAt,
-        datasetVersion: data.manifest.datasetVersion,
-        region,
-        stationCode: analysis.station.code,
-        stationName: analysis.station.name,
-        requestedWindow: activeWindow,
-        observedDrawCount: prizeLab.drawCount,
-        disclosure: "Thống kê mô tả dữ liệu lịch sử; không dự báo xác suất trúng.",
-        analysis: prizeLab,
-      },
-    );
-  };
-
-  const chooseRegion = (nextRegion: LotteryRegion) => {
-    if (nextRegion === region) return;
-    resetExplorer();
-    requestedStation.current = "";
-    setExplorerFrom("");
-    setExplorerTo("");
-    setExplorerValue("");
-    setExplorerMatch("suffix");
-    setExplorerPrizeGroup("");
-    setSelectedStation("");
-    setData(null);
-    setFallbackData(null);
-    setDraws([]);
-    setError("");
-    setHistoryError("");
-    setRegion(nextRegion);
-  };
-
-  const chooseStation = (station: string) => {
-    resetExplorer();
-    requestedStation.current = station;
-    setSelectedStation(station);
-    setDraws([]);
-    setHistoryError("");
-  };
-
-  const openExplorerEvidence = (
-    value: string,
-    match: LotteryPrizeMatch = "suffix",
-    prizeGroup: LotteryPrizeGroup | "" = "",
-  ) => {
-    const query: ExplorerQuery = {
-      region,
-      station: selectedStation,
-      from: prizeLab?.dateRange.from ?? analysis.analysisDraws[0].date,
-      to: prizeLab?.dateRange.to ?? analysis.analysisDraws[analysis.analysisDraws.length - 1].date,
-      number: null,
-      value,
-      match,
-      prizeGroup: prizeGroup || null,
-    };
-    resetExplorer();
-    setExplorerFrom(query.from ?? "");
-    setExplorerTo(query.to ?? "");
-    setExplorerValue(value);
-    setExplorerMatch(match);
-    setExplorerPrizeGroup(prizeGroup);
-    window.requestAnimationFrame(() => {
-      document.getElementById("explorer")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-    void runExplorer(false, query);
-  };
 
   return (
     <main className="app-shell">
@@ -750,406 +1140,76 @@ export default function Home() {
             <span className="data-period">{formatDate(data.range.from)} — {formatDate(data.range.to)}</span>
           </div>
         </div>
-        <div className="latest-card">
-          <div className="latest-card-head">
-            <span>Kết quả gần nhất</span>
-            <strong>{formatDate(latestDraw.date)}</strong>
-          </div>
-          <div className="latest-view-toggle" role="group" aria-label="Chế độ hiển thị kết quả gần nhất">
-            <button
-              type="button"
-              aria-controls="latest-result-panel"
-              aria-pressed={latestResultView === "tails"}
-              onClick={() => setLatestResultView("tails")}
-            >
-              Lô tô 2 số
-            </button>
-            <button
-              type="button"
-              aria-controls="latest-result-panel"
-              aria-pressed={latestResultView === "full"}
-              onClick={() => setLatestResultView("full")}
-            >
-              Kết quả đầy đủ
-            </button>
-          </div>
-          <div className="latest-station">{latestDraw.stationName}</div>
-          <div className="latest-result-body" id="latest-result-panel">
-            {latestResultView === "tails" ? (
-              <>
-                <div className="special-result">
-                  <small>Đuôi giải đặc biệt</small>
-                  <strong>{latestDraw.specialTail}</strong>
-                </div>
-                <div className="latest-grid" aria-label={`${latestDraw.numbers.length} kết quả loto gần nhất`}>
-                  {latestDraw.numbers.map((number, index) => (
-                    <span className={index === 0 ? "is-special" : ""} key={`${number}-${index}`}>
-                      {number}
-                    </span>
-                  ))}
-                </div>
-                <p>{latestDraw.numbers.length} kết quả · giữ nguyên số 0 ở đầu</p>
-              </>
-            ) : (
-              <>
-                <div
-                  className="latest-prize-table"
-                  role="table"
-                  aria-label={`Kết quả đầy đủ ${latestDraw.stationName} ngày ${formatDate(latestDraw.date)}`}
-                >
-                  {orderedPrizeEntries(latestDraw.prizes).map(([group, prizes]) => (
-                    <div
-                      className={group === "special" ? "latest-prize-row special" : "latest-prize-row"}
-                      role="row"
-                      key={group}
-                    >
-                      <span role="rowheader">{PRIZE_NAMES[group] ?? group}</span>
-                      <div role="cell">
-                        {prizes.map((prize, index) => (
-                          <strong key={`${prize}-${index}`}>{prize}</strong>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-                <p>Số giải đầy đủ · giữ nguyên số 0 ở đầu</p>
-              </>
-            )}
-          </div>
-        </div>
+        <LatestResultCard
+          latestDraw={latestDraw}
+          latestResultView={latestResultView}
+          onViewChange={setLatestResultView}
+        />
       </section>
 
-      <section className="metrics" aria-label="Chỉ số dữ liệu">
-        <article><span>01</span><small>Tổng kỳ quay</small><strong>{numberFormatter.format(data.drawCount)}</strong><p>Từ {formatDate(data.range.from)}</p></article>
-        <article><span>02</span><small>Kết quả quan sát</small><strong>{numberFormatter.format(data.resultCount)}</strong><p>{latestDraw.numbers.length} kết quả mỗi kỳ / đài</p></article>
-        <article><span>03</span><small>Cửa sổ mô hình</small><strong>{activeWindow} kỳ</strong><p>Đang được áp dụng</p></article>
-        <article><span>04</span><small>Backtest gần nhất</small><strong>{analysis.evaluationCount} kỳ</strong><p>Walk-forward · baseline 10%</p></article>
-      </section>
+      <MetricsBar
+        drawCount={data.drawCount}
+        resultCount={data.resultCount}
+        rangeFrom={data.range.from}
+        resultsPerDraw={latestDraw.numbers.length}
+        activeWindow={activeWindow}
+        evaluationCount={analysis.evaluationCount}
+      />
 
-      <section className="result-explorer" id="explorer">
-        <div className="section-heading">
-          <div><p className="kicker">RESULT EXPLORER</p><h2>Tra cứu từng kỳ quay</h2></div>
-          <p>
-            Tìm theo số đầy đủ hoặc đuôi 1–6 chữ số, thu hẹp đúng nhóm giải và giữ nguyên mọi số 0 ở đầu.
-          </p>
-        </div>
-        <form
-          className="explorer-controls"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void runExplorer();
-          }}
-        >
-          <label>
-            Đài
-            <select value={selectedStation} onChange={(event) => chooseStation(event.target.value)}>
-              {data.stations.map((station) => (
-                <option key={station.code} value={station.code}>{station.name}</option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Từ ngày
-            <input
-              type="date"
-              value={explorerFrom}
-              onChange={(event) => {
-                resetExplorer();
-                setExplorerFrom(event.target.value);
-              }}
-            />
-          </label>
-          <label>
-            Đến ngày
-            <input
-              type="date"
-              value={explorerTo}
-              onChange={(event) => {
-                resetExplorer();
-                setExplorerTo(event.target.value);
-              }}
-            />
-          </label>
-          <label>
-            Cách khớp
-            <select
-              value={explorerMatch}
-              onChange={(event) => {
-                resetExplorer();
-                setExplorerMatch(event.target.value as LotteryPrizeMatch);
-              }}
-            >
-              <option value="suffix">Khớp đuôi</option>
-              <option value="exact">Số đầy đủ</option>
-            </select>
-          </label>
-          <label>
-            {explorerMatch === "suffix" ? "Đuôi cần tìm" : "Số cần tìm"}
-            <input
-              type="text"
-              inputMode="numeric"
-              pattern="[0-9]{1,6}"
-              maxLength={6}
-              placeholder={explorerMatch === "suffix" ? "VD: 13 hoặc 113" : "VD: 005113"}
-              value={explorerValue}
-              onChange={(event) => {
-                resetExplorer();
-                setExplorerValue(event.target.value.replace(/\D/g, "").slice(0, 6));
-              }}
-            />
-          </label>
-          <label>
-            Nhóm giải
-            <select
-              value={explorerPrizeGroup}
-              onChange={(event) => {
-                resetExplorer();
-                setExplorerPrizeGroup(event.target.value as LotteryPrizeGroup | "");
-              }}
-            >
-              <option value="">Tất cả giải</option>
-              {explorerPrizeGroups.map((group) => (
-                <option key={group} value={group}>{PRIZE_NAMES[group] ?? group}</option>
-              ))}
-            </select>
-          </label>
-          <button type="submit" disabled={explorerState.status === "loading"}>
-            {explorerState.status === "loading" && !explorerState.appending ? "Đang tra…" : "Tra kết quả"}
-          </button>
-        </form>
-        {(explorerDeepLinkError || (explorerState.status === "error" && explorerState.error)) && (
-          <p className="explorer-message error" role="alert">
-            {explorerDeepLinkError || explorerState.error}
-          </p>
-        )}
-        {explorerState.status === "idle" && !explorerDeepLinkError && (
-          <p className="explorer-message">Chọn bộ lọc rồi bấm “Tra kết quả”. Đặt hai ngày giống nhau để tra đúng một kỳ.</p>
-        )}
-        {explorerState.status === "loading" && explorerState.items.length === 0 && (
-          <p className="explorer-message" role="status">Đang tìm trong lịch sử đã publish…</p>
-        )}
-        {explorerState.status === "empty" && (
-          <p className="explorer-message" role="status">Không tìm thấy kỳ quay phù hợp với bộ lọc đã áp dụng.</p>
-        )}
-        <div
-          className="result-list"
-          aria-busy={explorerState.status === "loading"}
-          aria-live="polite"
-        >
-          {explorerState.items.map((draw) => (
-            <article className="result-card" key={`${draw.stationCode}-${draw.date}`}>
-              <header>
-                <div><small>{draw.stationName}</small><h3>{formatDate(draw.date)}</h3></div>
-                <div className="result-special"><small>Đặc biệt</small><strong>{draw.specialPrize}</strong></div>
-              </header>
-              <div className="prize-table">
-                {orderedPrizeEntries(draw.prizes)
-                  .filter(([group]) =>
-                    appliedExplorerQuery?.prizeGroup === null ||
-                    appliedExplorerQuery?.prizeGroup === undefined ||
-                    appliedExplorerQuery.prizeGroup === group
-                  )
-                  .map(([group, prizes]) => (
-                    <div className={group === "special" ? "prize-row special" : "prize-row"} key={group}>
-                      <span>{PRIZE_NAMES[group] ?? group}</span>
-                      <div>
-                        {prizes.map((prize, index) => (
-                          <strong
-                            className={prizeMatchesExplorerQuery(
-                              prize,
-                              group,
-                              explorerState.appliedQuery,
-                            ) ? "matched" : ""}
-                            key={`${prize}-${index}`}
-                          >
-                            {prize}
-                          </strong>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            </article>
-          ))}
-        </div>
-        {explorerState.cursor && explorerState.appliedQuery && (
-          <button
-            className="next-page"
-            type="button"
-            disabled={explorerState.status === "loading"}
-            onClick={() => void runExplorer(true)}
-          >
-            {explorerState.appending ? "Đang tải thêm…" : "Tải thêm kết quả →"}
-          </button>
-        )}
-      </section>
+      <ResultExplorer
+        stations={data.stations}
+        selectedStation={selectedStation}
+        explorerFrom={explorerFrom}
+        explorerTo={explorerTo}
+        explorerValue={explorerValue}
+        explorerMatch={explorerMatch}
+        explorerPrizeGroup={explorerPrizeGroup}
+        explorerPrizeGroups={explorerPrizeGroups}
+        explorerDeepLinkError={explorerDeepLinkError}
+        explorerState={explorerState}
+        chooseStation={chooseStation}
+        resetExplorer={resetExplorer}
+        runExplorer={runExplorer}
+        setExplorerFrom={setExplorerFrom}
+        setExplorerTo={setExplorerTo}
+        setExplorerValue={setExplorerValue}
+        setExplorerMatch={setExplorerMatch}
+        setExplorerPrizeGroup={setExplorerPrizeGroup}
+      />
 
-      <section className="model-lab" id="models">
-        <div className="section-heading">
-          <div><p className="kicker">MODEL LAB</p><h2>Chạy thử các góc nhìn</h2></div>
-          <p>Coverage đo tỷ lệ {latestDraw.numbers.length} kết quả thực tế nằm trong top 10 của model. Lift được so với baseline 10%.</p>
-        </div>
-
-        <div className="control-bar">
-          <div className="region-switch" aria-label="Chọn miền">
-            {LOTTERY_REGIONS.map((option) => (
-              <button
-                className={region === option ? "active" : ""}
-                key={option}
-                type="button"
-                onClick={() => chooseRegion(option)}
-                aria-pressed={region === option}
-              >
-                {option.toUpperCase()} <span>{region === option ? "Đang xem" : "Sẵn sàng"}</span>
-              </button>
-            ))}
-          </div>
-          {data.stations.length > 1 && (
-            <label>
-              Đài phân tích
-              <select value={selectedStation} onChange={(event) => chooseStation(event.target.value)}>
-                {data.stations.map((station) => (
-                  <option key={station.code} value={station.code}>{station.name}</option>
-                ))}
-              </select>
-            </label>
-          )}
-          <label>
-            Cửa sổ phân tích
-            <select value={selectedWindow} onChange={(event) => setSelectedWindow(Number(event.target.value))}>
-              {WINDOW_OPTIONS.map((window) => <option key={window} value={window}>{window} kỳ gần nhất</option>)}
-            </select>
-          </label>
-          <button className="run-button" type="button" onClick={runModels}>Chạy mô hình <span>↗</span></button>
-          <small>Lần chạy: {lastRun}</small>
-        </div>
-
-        {analysis.benchmarkAvailable ? (
-          <div className="model-grid">
-            {analysis.models.map((model, index) => (
-              <article className="model-card" key={model.kind}>
-                <div className="model-index">0{index + 1}</div>
-                <p className="model-eyebrow">{model.eyebrow}</p>
-                <h3>{model.name}</h3>
-                <p className="model-description">{model.description}</p>
-                <div className="pick-list" aria-label={`Top 10 ${model.name}`}>
-                  {model.picks.map((number, pickIndex) => (
-                    <button
-                      type="button"
-                      key={number}
-                      className={pickIndex < 3 ? "top-pick" : ""}
-                      onClick={() => openExplorerEvidence(number)}
-                      aria-label={`Tra các giải có đuôi ${number} trong ${activeWindow} kỳ`}
-                      title={`Mở bằng chứng gốc cho đuôi ${number}`}
-                    >
-                      {number}
-                    </button>
-                  ))}
-                </div>
-                <div className="model-stats">
-                  <div>
-                    <small>Coverage</small>
-                    <strong>{percentFormatter.format(model.benchmark.coverage)}</strong>
-                  </div>
-                  <div>
-                    <small>95% CI</small>
-                    <strong>
-                      {percentFormatter.format(model.benchmark.coverageConfidenceInterval.lower)}
-                      {" — "}
-                      {percentFormatter.format(model.benchmark.coverageConfidenceInterval.upper)}
-                    </strong>
-                  </div>
-                  <div>
-                    <small>Hit rate</small>
-                    <strong>{percentFormatter.format(model.benchmark.hitRate)}</strong>
-                  </div>
-                  <div>
-                    <small>Lift / baseline</small>
-                    <strong>{model.benchmark.lift.toFixed(2)}×</strong>
-                  </div>
-                </div>
-                <p className="model-sample">
-                  {model.benchmark.evaluationCount} kỳ · {formatDate(model.benchmark.evaluationRange.from)}
-                  {" — "}
-                  {formatDate(model.benchmark.evaluationRange.to)} · không nhìn trước
-                </p>
-                <code className="model-fingerprint">{model.benchmark.fingerprint}</code>
-              </article>
-            ))}
-          </div>
-        ) : (
-          <p className="model-empty-notice" role="status">
-            Chưa đủ lịch sử để backtest cửa sổ {activeWindow} kỳ: cần ít nhất{" "}
-            {analysis.requiredDraws} kỳ nhưng đài này mới có {analysis.availableDraws} kỳ.
-            Chọn cửa sổ nhỏ hơn rồi bấm “Chạy mô hình”; heatmap, nóng/lạnh và Prize Lab
-            vẫn dùng toàn bộ lịch sử hiện có.
-          </p>
-        )}
-        <div className="benchmark-actions">
-          <p className="model-warning">
-            <strong>{ANALYTICS_MODEL_VERSION}</strong> · baseline {percentFormatter.format(BASELINE_COVERAGE)}.
-            {" "}12 lựa chọn model/cửa sổ (3 × 4) là phân tích khám phá; chọn lặp lại có thể làm kết quả
-            trông tốt hơn thực tế. Đây là heuristic mô tả và backtest, không phải dự báo xác suất trúng
-            hay khuyến nghị đặt cược.
-          </p>
-          <button
-            className="benchmark-download"
-            type="button"
-            onClick={downloadBenchmarkReport}
-            disabled={!analysis.benchmarkAvailable}
-          >
-            Tải benchmark JSON
-          </button>
-        </div>
-      </section>
+      <ModelLab
+        region={region}
+        stations={data.stations}
+        selectedStation={selectedStation}
+        selectedWindow={selectedWindow}
+        activeWindow={activeWindow}
+        lastRun={lastRun}
+        resultsPerDraw={latestDraw.numbers.length}
+        benchmarkAvailable={analysis.benchmarkAvailable}
+        requiredDraws={analysis.requiredDraws}
+        availableDraws={analysis.availableDraws}
+        models={analysis.models}
+        chooseRegion={chooseRegion}
+        chooseStation={chooseStation}
+        onWindowChange={setSelectedWindow}
+        runModels={runModels}
+        openExplorerEvidence={openExplorerEvidence}
+        downloadBenchmarkReport={downloadBenchmarkReport}
+      />
 
       <section className="analysis-grid" id="heatmap">
-        <article className="panel heatmap-panel">
-          <div className="panel-heading">
-            <div><p className="kicker">DISTRIBUTION</p><h2>Heatmap 00–99</h2></div>
-            <span>{activeWindow} kỳ</span>
-          </div>
-          <div className="heatmap" aria-label="Tần suất loto từ 00 đến 99">
-            {Array.from({ length: 100 }, (_, index) => String(index).padStart(2, "0")).map((number) => {
-              const intensity = analysis.counts[number] / analysis.maxFrequency;
-              return (
-                <button
-                  type="button"
-                  className="heat-cell"
-                  key={number}
-                  onClick={() => openExplorerEvidence(number)}
-                  style={heatCellColors(intensity)}
-                  title={`${number}: ${analysis.counts[number]} lần`}
-                  aria-label={`Tra các giải có đuôi ${number}, xuất hiện ${analysis.counts[number]} lần`}
-                >
-                  <strong>{number}</strong><small>{analysis.counts[number]}</small>
-                </button>
-              );
-            })}
-          </div>
-          <div className="heat-legend"><span>Ít</span><i /><i /><i /><i /><i /><span>Nhiều</span></div>
-        </article>
-
-        <aside className="signal-stack">
-          <article className="panel signal-panel">
-            <div className="panel-heading"><div><p className="kicker">SIGNALS</p><h2>Nóng / lạnh</h2></div></div>
-            <div className="rank-columns">
-              <div><h3>Tần suất cao</h3>{analysis.hot.map(([number, count], index) => <div className="rank-row" key={number}><span>{index + 1}</span><strong>{number}</strong><div><i style={{ width: `${(count / analysis.maxFrequency) * 100}%` }} /></div><small>{count}</small></div>)}</div>
-              <div><h3>Tần suất thấp</h3>{analysis.cold.map(([number, count], index) => <div className="rank-row cold" key={number}><span>{index + 1}</span><strong>{number}</strong><div><i style={{ width: `${(count / analysis.maxFrequency) * 100}%` }} /></div><small>{count}</small></div>)}</div>
-            </div>
-          </article>
-
-          <article className="panel momentum-panel">
-            <div className="panel-heading"><div><p className="kicker">7D VS 30D</p><h2>Đà tăng ngắn hạn</h2></div></div>
-            {analysis.momentum.map((item) => (
-              <div className="momentum-row" key={item.number}>
-                <strong>{item.number}</strong>
-                <div><i style={{ width: `${Math.max(8, Math.min(100, 50 + item.score * 210))}%` }} /></div>
-                <span>{item.score >= 0 ? "+" : ""}{item.score.toFixed(2)}/kỳ</span>
-              </div>
-            ))}
-          </article>
-        </aside>
+        <LotoHeatmap
+          counts={analysis.counts}
+          maxFrequency={analysis.maxFrequency}
+          activeWindow={activeWindow}
+          openExplorerEvidence={openExplorerEvidence}
+        />
+        <SignalStack
+          hot={analysis.hot}
+          cold={analysis.cold}
+          maxFrequency={analysis.maxFrequency}
+          momentum={analysis.momentum}
+        />
       </section>
 
       <section className="prize-lab" id="prize-lab">
@@ -1168,256 +1228,23 @@ export default function Home() {
             </div>
           )}
         </div>
-
-        {prizeLab === null ? (
-          <p className="prize-lab-empty" role="status">
-            Dữ liệu giải trong cửa sổ này chưa vượt qua kiểm tra nhất quán (thiếu nhóm giải hoặc lệch
-            định dạng) nên Prize Lab tạm ẩn. Các phân tích còn lại vẫn hiển thị từ lịch sử hiện có.
-          </p>
-        ) : (<>
-          <div className="prize-kpis" aria-label="Tổng quan giải đặc biệt">
-            <article>
-              <small>Mẫu giải đặc biệt</small>
-              <strong>{numberFormatter.format(prizeLab.specialPrize.observations)}</strong>
-              <p>{formatDate(prizeLab.dateRange.from)} — {formatDate(prizeLab.dateRange.to)}</p>
-            </article>
-            <article>
-              <small>Giá trị phân biệt</small>
-              <strong>{numberFormatter.format(prizeLab.specialPrize.distinctCount)}</strong>
-              <p>{prizeLab.specialPrize.exactRepeats.length} giá trị có lặp</p>
-            </article>
-            <article>
-              <small>Bắt đầu bằng 0</small>
-              <strong>{percentFormatter.format(prizeLab.specialPrize.leadingZeroRate)}</strong>
-              <p>{prizeLab.specialPrize.leadingZeroCount} / {prizeLab.specialPrize.observations} kỳ</p>
-            </article>
-            <article>
-              <small>Đuôi chẵn / lẻ</small>
-              <strong>
-                {percentFormatter.format(prizeLab.specialPrize.parity.evenRate)}
-                {" / "}
-                {percentFormatter.format(prizeLab.specialPrize.parity.oddRate)}
-              </strong>
-              <p>Đếm theo chữ số cuối</p>
-            </article>
-          </div>
-
-          <div className="prize-lab-layout">
-            <article className="panel prize-anatomy">
-              <div className="panel-heading">
-                <div>
-                  <p className="kicker">SPECIAL PRIZE ANATOMY</p>
-                  <h2>Giải đặc biệt {prizeLab.specialPrize.officialWidth} số</h2>
-                </div>
-                <span>{PRIZE_ANALYTICS_VERSION}</span>
-              </div>
-
-              <h3>Chữ số nổi bật theo từng vị trí</h3>
-              <div
-                className="position-grid"
-                style={{
-                  "--position-columns": prizeLab.specialPrize.officialWidth,
-                } as CSSProperties}
-              >
-                {specialPositionLeaders.map(({ position, leaders }) => (
-                  <div key={position}>
-                    <small>Vị trí {position}</small>
-                    <strong className={leaders.length > 1 ? "has-tie" : undefined}>
-                      {leaders.map((leader) => leader.digit).join(" · ")}
-                    </strong>
-                    <span>
-                      {leaders[0].count} lần · {percentFormatter.format(leaders[0].rate)}
-                      {leaders.length > 1 ? ` · ${leaders.length} số đồng hạng` : ""}
-                    </span>
-                  </div>
-                ))}
-              </div>
-
-              <div className="digit-presence">
-                <h3>Chạm 0–9 trong giải đặc biệt</h3>
-                <div
-                  className="digit-presence-grid"
-                  aria-label="Tỷ lệ kỳ mà giải đặc biệt chứa từng chữ số 0 đến 9"
-                >
-                  {prizeLab.specialPrize.digitPresence.map((item) => (
-                    <div
-                      className="digit-presence-row"
-                      key={item.digit}
-                      title={`Chạm ${item.digit}: ${item.count}/${prizeLab.specialPrize.observations} kỳ`}
-                    >
-                      <strong>{item.digit}</strong>
-                      <div><i style={{ width: `${item.rate * 100}%` }} /></div>
-                      <small>{item.count} kỳ · {percentFormatter.format(item.rate)}</small>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="prize-pattern-columns">
-                <div>
-                  <h3>Đuôi 3 số lặp lại</h3>
-                  {topSpecialTails.length > 0 ? (
-                    <div className="pattern-list">
-                      {topSpecialTails.map((item) => {
-                        const drawsSince = specialTailRecency.get(item.tail3);
-                        return (
-                          <button
-                            type="button"
-                            key={item.tail3}
-                            onClick={() => openExplorerEvidence(item.tail3, "suffix", "special")}
-                            title={`Tra giải đặc biệt có đuôi ${item.tail3}`}
-                          >
-                            <strong>{item.tail3}</strong>
-                            <span>
-                              {item.count} lần · {percentFormatter.format(item.rate)}
-                              {drawsSince !== undefined && (drawsSince === 0
-                                ? " · vừa về kỳ mới nhất"
-                                : ` · về cách đây ${drawsSince} kỳ`)}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    <p className="pattern-empty">Chưa có đuôi 3 số nào lặp trong cửa sổ này.</p>
-                  )}
-                </div>
-                <div>
-                  <h3>Đầu 3 số lặp lại</h3>
-                  {topSpecialHeads.length > 0 ? (
-                    <div className="pattern-list">
-                      {topSpecialHeads.map((item) => (
-                        <div key={item.head3}>
-                          <strong>{item.head3}</strong>
-                          <span>{item.count} lần · {percentFormatter.format(item.rate)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="pattern-empty">Chưa có đầu 3 số nào lặp trong cửa sổ này.</p>
-                  )}
-                </div>
-                <div>
-                  <h3>Tổng chữ số phổ biến</h3>
-                  <div className="pattern-list digit-sums">
-                    {topSpecialDigitSums.map((item) => (
-                      <div key={item.digitSum}>
-                        <strong>{item.digitSum}</strong>
-                        <span>{item.count} lần · {percentFormatter.format(item.rate)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              <div className="repeat-strip">
-                <h3>Giá trị đặc biệt đã lặp trong cửa sổ</h3>
-                {prizeLab.specialPrize.exactRepeats.length > 0 ? (
-                  <div>
-                    {prizeLab.specialPrize.exactRepeats.slice(0, 8).map((item) => (
-                      <button
-                        type="button"
-                        key={item.formattedNumber}
-                        onClick={() => openExplorerEvidence(item.formattedNumber, "exact", "special")}
-                      >
-                        <strong>{item.formattedNumber}</strong>
-                        <span>{item.count} lần</span>
-                      </button>
-                    ))}
-                  </div>
-                ) : (
-                  <p>Không có giải đặc biệt trùng hoàn toàn trong cửa sổ này.</p>
-                )}
-              </div>
-            </article>
-
-            <article className="panel prize-groups-panel">
-              <div className="panel-heading">
-                <div>
-                  <p className="kicker">PRIZE GROUP SUMMARY</p>
-                  <h2>Không trộn nhóm giải</h2>
-                </div>
-                <span>{prizeLab.drawCount} kỳ</span>
-              </div>
-              <div className="prize-group-table" role="table" aria-label="Tóm tắt từng nhóm giải">
-                <div className="prize-group-header" role="row">
-                  <span role="columnheader">Nhóm</span>
-                  <span role="columnheader">Rộng</span>
-                  <span role="columnheader">Mẫu</span>
-                  <span role="columnheader">Phân biệt</span>
-                  <span role="columnheader">Zero đầu</span>
-                  <span role="columnheader">Đuôi chẵn</span>
-                </div>
-                {prizeLab.prizeGroups.map((summary) => (
-                  <div className="prize-group-data" role="row" key={summary.prizeGroup}>
-                    <strong role="rowheader">{PRIZE_NAMES[summary.prizeGroup] ?? summary.prizeGroup}</strong>
-                    <span role="cell">{summary.officialWidth} số</span>
-                    <span role="cell">{numberFormatter.format(summary.observations)}</span>
-                    <span role="cell">{numberFormatter.format(summary.distinctCount)}</span>
-                    <span role="cell">{percentFormatter.format(summary.leadingZeroRate)}</span>
-                    <span role="cell">{percentFormatter.format(summary.parity.evenRate)}</span>
-                  </div>
-                ))}
-              </div>
-            </article>
-          </div>
-
-          <p className="prize-lab-disclosure">
-            {PRIZE_ANALYTICS_VERSION} · dataset {data.manifest.datasetVersion} · một đài, một cửa sổ, đúng độ dài chính
-            thức. Mọi nút số mở Result Explorer để truy ngược kỳ quay gốc. Dữ liệu lịch sử không bảo đảm kết quả tương
-            lai.
-          </p>
-        </>)}
+        <PrizeLab
+          prizeLab={prizeLab}
+          datasetVersion={data.manifest.datasetVersion}
+          openExplorerEvidence={openExplorerEvidence}
+        />
       </section>
 
-      <section className="data-health" id="health">
-        <div className="section-heading">
-          <div><p className="kicker">DATA HEALTH</p><h2>Biết dashboard đang đọc gì</h2></div>
-          <p>Dashboard chỉ đọc JSON gọn qua API Worker. Gold Parquet và credential không bao giờ được gửi xuống trình duyệt.</p>
-        </div>
-        <div className="health-grid">
-          <article>
-            <span className={`health-dot ${operations?.health.healthy ? "good" : operations ? "bad" : "pending"}`} />
-            <div>
-              <small>Serving health</small>
-              <strong>
-                {operations?.health.healthy
-                  ? "3/3 miền đạt chuẩn"
-                  : operations
-                    ? `Lỗi: ${unhealthyRegions.map((item) => item.toUpperCase()).join(", ")}`
-                    : operationsError || "Đang chờ health API"}
-              </strong>
-            </div>
-            <em>{operations ? `TARGET ${formatDate(operations.health.expectedTargetDate)}` : "UNAVAILABLE"}</em>
-          </article>
-          <article title={regionalHealth?.issues.join("; ") || undefined}>
-            <span className={`health-dot ${regionalHealth?.healthy ? "good" : regionalHealth ? "bad" : "pending"}`} />
-            <div>
-              <small>{region.toUpperCase()} mới nhất</small>
-              <strong>
-                {formatDate(regionalHealth?.latestDrawDate ?? latestDraw.date)}
-              </strong>
-            </div>
-            <em>{regionalHealth?.healthy ? "REGION OK" : regionalHealth ? "ISSUES" : "NO STATUS"}</em>
-          </article>
-          <article>
-            <span className={`health-dot ${watchdogDot}`} />
-            <div>
-              <small>Watchdog gần nhất</small>
-              <strong>{formatTimestamp(watchdogState?.lastObservedAt)}</strong>
-            </div>
-            <em>{watchdogLabel}</em>
-          </article>
-          <article>
-            <span className={`health-dot ${lineageHealthy ? "good" : dataSource === "r2" ? "bad" : "pending"}`} />
-            <div>
-              <small>Dataset lineage · {analysis.station.code.toUpperCase()}</small>
-              <strong>{data.manifest.datasetVersion}</strong>
-            </div>
-            <em>{dataSource === "r2" ? (lineageHealthy ? "R2 SYNCED" : "R2 MISMATCH") : "DEMO"}</em>
-          </article>
-        </div>
-      </section>
+      <DataHealth
+        operations={operations}
+        operationsError={operationsError}
+        region={region}
+        dataSource={dataSource}
+        datasetVersion={data.manifest.datasetVersion}
+        matchesManifestTarget={data.freshness.matchesManifestTarget}
+        stationCode={analysis.station.code}
+        latestDrawDate={latestDraw.date}
+      />
 
       <footer>
         <div className="brand footer-brand"><span className="brand-mark">LL</span><span><strong>LÔTÔ LAB</strong><small>DESCRIPTIVE ANALYTICS</small></span></div>

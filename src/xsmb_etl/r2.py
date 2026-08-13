@@ -7,7 +7,7 @@ from typing import Any
 
 import boto3
 from botocore.client import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 
 from xsmb_etl.config import Settings
 from xsmb_etl.run_models import LotteryRegion
@@ -174,13 +174,19 @@ class R2ObjectStore:
         )
 
     def get_bytes(self, key: str) -> bytes:
-        try:
-            response = self.client.get_object(Bucket=self.bucket, Key=key)
-        except ClientError as exc:
-            if _is_not_found(exc):
-                raise ObjectNotFoundError(f'object does not exist: {key}') from exc
-            raise
-        return bytes(response['Body'].read())
+        attempts = self.settings.r2_max_retries + 1
+        for attempt in range(attempts):
+            try:
+                response = self.client.get_object(Bucket=self.bucket, Key=key)
+                return bytes(response['Body'].read())
+            except ClientError as exc:
+                if _is_not_found(exc):
+                    raise ObjectNotFoundError(f'object does not exist: {key}') from exc
+                raise
+            except ReadTimeoutError:
+                if attempt == attempts - 1:
+                    raise
+        raise AssertionError('R2 read retry loop ended unexpectedly')
 
     def exists(self, key: str) -> bool:
         try:

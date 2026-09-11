@@ -20,12 +20,12 @@ on:
           - xsmt
         default: all
   schedule:
-    # Queue before the draw cutoff so GitHub scheduler delay is less likely to
-    # push the actual ETL late into the evening. The gate job below still
-    # prevents scheduled extraction before 18:35 Asia/Ho_Chi_Minh.
+    # Queue before the draw cutoff. The gate waits only for a bounded on-time
+    # start and pins delayed or repeated attempts to one completed draw date.
     - cron: "17 11 * * *"
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -33,26 +33,34 @@ jobs:
     name: Wait for the 18:35 draw cutoff
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      target_date: ${{ steps.window.outputs.target_date }}
     steps:
-      - name: Wait until 18:35 Vietnam time
+      - name: Checkout
+        if: github.event_name == 'schedule'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Resolve completed draw window
+        id: window
         if: github.event_name == 'schedule'
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          vietnam_date="$(TZ=Asia/Ho_Chi_Minh date +%F)"
-          now_epoch="$(date +%s)"
-          cutoff_epoch="$(TZ=Asia/Ho_Chi_Minh date --date="${vietnam_date} 18:35:00" +%s)"
-          wait_seconds=$((cutoff_epoch - now_epoch))
-
-          if (( wait_seconds > 1200 )); then
-            echo "Refusing an unexpected ${wait_seconds}-second wait." >&2
-            exit 1
-          fi
-          if (( wait_seconds > 0 )); then
-            echo "Scheduled early; waiting ${wait_seconds} seconds for the draw cutoff."
-            sleep "$wait_seconds"
+          set -euo pipefail
+          command=(python3 scripts/resolve_daily_window.py --github-output "$GITHUB_OUTPUT")
+          if [[ "$GITHUB_RUN_ATTEMPT" == "1" ]]; then
+            command+=(--wait)
           else
-            echo "Draw cutoff has passed; starting ETL immediately."
+            run_created_at="$(
+              gh api \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+                --jq '.created_at'
+            )"
+            command+=(--now "$run_created_at")
           fi
+          "${command[@]}"
 
   etl:
     name: ETL (${{ matrix.region }})
@@ -92,6 +100,7 @@ jobs:
       XSMN_FALLBACK_BASE_URL: ${{ vars.XSMN_FALLBACK_BASE_URL }}
       XSMT_FALLBACK_BASE_URL: ${{ vars.XSMT_FALLBACK_BASE_URL }}
       TARGET_DATE: ${{ inputs.target_date }}
+      SCHEDULED_TARGET_DATE: ${{ needs.draw-window.outputs.target_date }}
       FORCE: ${{ inputs.force }}
       REQUESTED_REGION: ${{ inputs.region }}
     steps:
@@ -134,8 +143,12 @@ jobs:
         shell: bash
         run: |
           command=(uv run lottery-etl run --storage r2 --region "${{ matrix.region }}")
-          if [[ -n "$TARGET_DATE" ]]; then
-            command+=(--target-date "$TARGET_DATE")
+          target_date="$TARGET_DATE"
+          if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
+            target_date="$SCHEDULED_TARGET_DATE"
+          fi
+          if [[ -n "$target_date" ]]; then
+            command+=(--target-date "$target_date")
           fi
           if [[ "$FORCE" == "true" ]]; then
             command+=(--force)

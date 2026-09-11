@@ -169,7 +169,7 @@ The audit starts at the first supported date for each lake (XSMB `2005-10-01`, X
 ## Automation
 
 - `ci.yml` runs Ruff, pytest, all three offline fixture pipelines, and frontend lint/type/build/API tests without production secrets.
-- `daily-etl.yml` queues at 18:17 Vietnam time, waits until the safe 18:35 draw cutoff, then runs all three independent R2 lakes. Manual region, target-date, and force inputs remain available without the scheduled wait.
+- `daily-etl.yml` queues at 18:17 Vietnam time and pins one completed draw date across all three independent R2 lakes. An on-time run waits until the safe 18:35 cutoff; a delayed or repeated run keeps the original completed draw date. Manual region, target-date, and force inputs remain available without the scheduled wait.
 - `dashboard-publish.yml` starts after a successful scheduled `daily-etl.yml` run, while retaining manual dispatch. It validates healthy manifests against the 18:35 draw cutoff and audits the complete published history of all three lakes before publishing to the private Sites serving bucket. Every immutable station/year shard is path- and release-validated first, shard uploads then run with bounded concurrency `8`, and the v2 metadata pointer is written only after all uploads succeed. Gate reports and upload timing/count evidence are retained as a workflow artifact for 30 days.
 - `weekly-csv-export.yml` materializes verified CSV snapshots every Sunday without doubling every daily Gold write.
 - `backup-and-restore-drill.yml` starts after a successful dashboard publication, while retaining manual dispatch. It

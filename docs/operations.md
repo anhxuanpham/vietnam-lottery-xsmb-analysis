@@ -2,6 +2,12 @@
 
 Every operation targets one independent lake with `--region xsmb`, `--region xsmn`, or `--region xsmt`. `--region all` executes all three and returns a region-tagged result for each lake.
 
+The scheduled daily workflow resolves and pins the completed draw date before starting the regional matrix. It waits
+only when the runner starts within 20 minutes of the 18:35 Vietnam cutoff; a cron delayed past local midnight processes
+the previous completed draw immediately instead of waiting for the next day's cutoff. A repeated attempt resolves from
+the original workflow run timestamp, so it cannot silently move to a newer draw date; use manual dispatch with an
+explicit target date for intentional historical recovery.
+
 ## Daily success
 
 1. The source page matches the requested date.

@@ -48,10 +48,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          command=(python3 scripts/resolve_daily_window.py --github-output "$GITHUB_OUTPUT")
-          if [[ "$GITHUB_RUN_ATTEMPT" == "1" ]]; then
-            command+=(--wait)
-          else
+          command=(python3 scripts/resolve_daily_window.py --github-output "$GITHUB_OUTPUT" --wait)
+          if [[ "$GITHUB_RUN_ATTEMPT" != "1" ]]; then
             run_created_at="$(
               gh api \
                 -H "X-GitHub-Api-Version: 2022-11-28" \

@@ -21,21 +21,28 @@ class DailyDrawWindow:
     wait_seconds: int
 
 
-def resolve_daily_draw_window(now: datetime) -> DailyDrawWindow:
+def resolve_daily_draw_window(now: datetime, *, wait_now: datetime | None = None) -> DailyDrawWindow:
     if now.tzinfo is None:
         raise ValueError('now must include a timezone')
+    if wait_now is not None and wait_now.tzinfo is None:
+        raise ValueError('wait_now must include a timezone')
+    if wait_now is not None and wait_now < now:
+        raise ValueError('wait_now must not precede now')
 
     vietnam_now = now.astimezone(VIETNAM_TIMEZONE)
     cutoff = datetime.combine(vietnam_now.date(), DRAW_CUTOFF, tzinfo=VIETNAM_TIMEZONE)
     remaining = cutoff - vietnam_now
     if remaining <= timedelta(0):
-        return DailyDrawWindow(target_date=vietnam_now.date(), wait_seconds=0)
-    if remaining <= MAX_SAME_DAY_WAIT:
-        return DailyDrawWindow(
-            target_date=vietnam_now.date(),
-            wait_seconds=math.ceil(remaining.total_seconds()),
-        )
-    return DailyDrawWindow(target_date=vietnam_now.date() - timedelta(days=1), wait_seconds=0)
+        target_date = vietnam_now.date()
+    elif remaining <= MAX_SAME_DAY_WAIT:
+        target_date = vietnam_now.date()
+    else:
+        target_date = vietnam_now.date() - timedelta(days=1)
+
+    wait_reference = (wait_now or now).astimezone(VIETNAM_TIMEZONE)
+    target_cutoff = datetime.combine(target_date, DRAW_CUTOFF, tzinfo=VIETNAM_TIMEZONE)
+    wait_seconds = max(0, math.ceil((target_cutoff - wait_reference).total_seconds()))
+    return DailyDrawWindow(target_date=target_date, wait_seconds=wait_seconds)
 
 
 def _datetime(value: str) -> datetime:
@@ -53,10 +60,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument('--github-output', type=Path, required=True)
     parser.add_argument('--wait', action='store_true')
     parser.add_argument('--now', type=_datetime, help=argparse.SUPPRESS)
+    parser.add_argument('--wait-now', type=_datetime, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     now = args.now or datetime.now(UTC)
-    window = resolve_daily_draw_window(now)
+    wait_now = args.wait_now
+    if args.wait and args.now is not None and wait_now is None:
+        wait_now = datetime.now(UTC)
+    window = resolve_daily_draw_window(now, wait_now=wait_now)
     with args.github_output.open('a', encoding='utf-8') as output:
         output.write(f'target_date={window.target_date.isoformat()}\n')
         output.write(f'wait_seconds={window.wait_seconds}\n')

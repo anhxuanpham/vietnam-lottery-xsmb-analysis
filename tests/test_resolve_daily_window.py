@@ -64,6 +64,26 @@ def test_runner_after_cutoff_processes_same_day_immediately() -> None:
     assert window.wait_seconds == 0
 
 
+def test_rerun_before_cutoff_waits_only_for_remaining_real_time() -> None:
+    window = resolve_daily_draw_window(
+        datetime(2026, 9, 10, 11, 17, tzinfo=UTC),
+        wait_now=datetime(2026, 9, 10, 11, 30, tzinfo=UTC),
+    )
+
+    assert window.target_date == date(2026, 9, 10)
+    assert window.wait_seconds == 5 * 60
+
+
+def test_rerun_after_cutoff_keeps_original_target_without_waiting_again() -> None:
+    window = resolve_daily_draw_window(
+        datetime(2026, 9, 10, 11, 17, tzinfo=UTC),
+        wait_now=datetime(2026, 9, 12, 2, 0, tzinfo=UTC),
+    )
+
+    assert window.target_date == date(2026, 9, 10)
+    assert window.wait_seconds == 0
+
+
 def test_resolver_rejects_naive_datetime() -> None:
     with pytest.raises(ValueError, match='timezone'):
         resolve_daily_draw_window(datetime(2026, 9, 10, 18, 17))
@@ -93,7 +113,8 @@ def test_daily_workflow_pins_scheduled_target_across_jobs_and_retries() -> None:
         'target_date: ${{ steps.window.outputs.target_date }}',
         'SCHEDULED_TARGET_DATE: ${{ needs.draw-window.outputs.target_date }}',
         'target_date="$SCHEDULED_TARGET_DATE"',
-        'if [[ "$GITHUB_RUN_ATTEMPT" == "1" ]]',
+        'resolve_daily_window.py --github-output "$GITHUB_OUTPUT" --wait',
+        'if [[ "$GITHUB_RUN_ATTEMPT" != "1" ]]',
         'repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}',
         'command+=(--now "$run_created_at")',
     )

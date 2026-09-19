@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from io import BytesIO
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ReadTimeoutError
 import pytest
 
 from xsmb_etl.config import Settings
@@ -103,6 +103,46 @@ def test_r2_store_sets_content_metadata_cache_and_sha256() -> None:
     assert store.exists(stored.key)
     assert store.head(stored.key).sha256 == stored.sha256
     assert store.list_keys('gold/') == [stored.key]
+
+
+def test_r2_store_retries_read_timeout_when_fetching_bytes() -> None:
+    class FlakyReadClient(FakeS3Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self.get_calls = 0
+
+        def get_object(self, *, Bucket, Key):
+            self.get_calls += 1
+            if self.get_calls == 1:
+
+                class TimeoutBody:
+                    def read(self):
+                        raise ReadTimeoutError(endpoint_url='https://example.r2', error=TimeoutError('timed out'))
+
+                return {'Body': TimeoutBody()}
+            return super().get_object(Bucket=Bucket, Key=Key)
+
+    settings = Settings(
+        _env_file=None,
+        r2_account_id='account',
+        r2_access_key_id='access',
+        r2_secret_access_key='secret',
+        r2_bucket_name='bucket',
+        r2_max_retries=1,
+    )
+    client = FlakyReadClient()
+    store = R2ObjectStore(settings, client=client)
+    payload = b'draw-results'
+    client.put_object(
+        Bucket='bucket',
+        Key='silver/draw-results/year=2026/month=08/draw-results.parquet',
+        Body=payload,
+        ContentType='application/vnd.apache.parquet',
+        Metadata={},
+    )
+
+    assert store.get_bytes('silver/draw-results/year=2026/month=08/draw-results.parquet') == payload
+    assert client.get_calls == 2
 
 
 def test_r2_store_preserves_quoted_etag_for_compare_and_swap() -> None:

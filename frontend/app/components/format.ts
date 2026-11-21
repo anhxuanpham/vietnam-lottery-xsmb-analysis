@@ -1,7 +1,7 @@
 import {
   LOTTERY_PRIZE_GROUPS,
   type LotteryPrizeGroup,
-} from "@/lottery-contract";
+} from "../../lottery-contract.ts";
 
 export const numberFormatter = new Intl.NumberFormat("vi-VN");
 export const percentFormatter = new Intl.NumberFormat("vi-VN", {
@@ -32,6 +32,7 @@ export const PRIZE_NAMES: Record<string, string> = {
 };
 
 const dateFormatter = new Intl.DateTimeFormat("vi-VN", {
+  timeZone: "Asia/Ho_Chi_Minh",
   day: "2-digit",
   month: "2-digit",
   year: "numeric",

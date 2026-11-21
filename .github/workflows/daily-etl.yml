@@ -64,7 +64,7 @@ jobs:
     name: ETL (${{ matrix.region }})
     needs: draw-window
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     concurrency:
       group: vietnam-lottery-${{ matrix.region }}
       cancel-in-progress: false
@@ -99,6 +99,7 @@ jobs:
       XSMT_FALLBACK_BASE_URL: ${{ vars.XSMT_FALLBACK_BASE_URL }}
       TARGET_DATE: ${{ inputs.target_date }}
       SCHEDULED_TARGET_DATE: ${{ needs.draw-window.outputs.target_date }}
+      CATCHUP_DAYS: ${{ vars.DAILY_ETL_CATCHUP_DAYS || '60' }}
       FORCE: ${{ inputs.force }}
       REQUESTED_REGION: ${{ inputs.region }}
     steps:
@@ -144,6 +145,14 @@ jobs:
           target_date="$TARGET_DATE"
           if [[ "$GITHUB_EVENT_NAME" == "schedule" ]]; then
             target_date="$SCHEDULED_TARGET_DATE"
+            from_date="$(uv run python -m xsmb_etl.daily_catchup_window --target-date "$target_date" --days "$CATCHUP_DAYS")"
+            command=(uv run lottery-etl backfill --storage r2 --region "${{ matrix.region }}" --from "$from_date" --to "$target_date")
+            "${command[@]}" | tee etl-result.json
+            if jq --exit-status 'any(.[]; .status == "failed")' etl-result.json >/dev/null; then
+              echo "Scheduled catch-up has failed dates; see etl-result.json." >&2
+              exit 1
+            fi
+            exit 0
           fi
           if [[ -n "$target_date" ]]; then
             command+=(--target-date "$target_date")
